@@ -1,0 +1,678 @@
+{
+  "fp_dim_final": 137,
+  "descriptor_start_idx": 137,
+  "feature_order": "fp_first",
+  "fp_params": {
+    "radius": 2,
+    "nBits": 2048
+  },
+  "filtering": {
+    "variance_threshold": 0.05,
+    "correlation_threshold": 0.9,
+    "fp_dim_raw": 2048,
+    "fp_dim_final": 137
+  },
+  "descriptor": {
+    "names": [
+      "MolWt",
+      "MolLogP",
+      "NumHDonors",
+      "NumHAcceptors",
+      "NumRotatableBonds",
+      "TPSA",
+      "HeavyAtomCount",
+      "NumValenceElectrons",
+      "NumAliphaticRings",
+      "NumAromaticRings",
+      "FractionCSP3",
+      "RingCount",
+      "LabuteASA",
+      "VSA_EState1",
+      "VSA_EState2",
+      "SlogP_VSA1",
+      "SlogP_VSA2",
+      "SMR_VSA1",
+      "SMR_VSA2",
+      "EState_VSA1"
+    ],
+    "dim": 20
+  },
+  "scaling": {
+    "use_for_non_tree": true,
+    "apply_to_descriptor_only": true,
+    "descriptor_start_idx": 137
+  },
+  "augmentation": {
+    "enabled": false,
+    "config": {
+      "use_smiles_augmentation": 0,
+      "n_augments": 1,
+      "method": "random_smiles",
+      "apply_to": "train_only",
+      "descriptor_mode": "reuse_original"
+    },
+    "cv": {
+      "enabled": 0,
+      "folds": [
+        {
+          "enabled": 0,
+          "original_size": 442,
+          "augmented_size": 442,
+          "added_samples": 0,
+          "n_augments": 1,
+          "method": "random_smiles",
+          "descriptor_mode": "reuse_original",
+          "split_seed": 4,
+          "phase_seed": 1,
+          "fold": 1
+        },
+        {
+          "enabled": 0,
+          "original_size": 265,
+          "augmented_size": 265,
+          "added_samples": 0,
+          "n_augments": 1,
+          "method": "random_smiles",
+          "descriptor_mode": "reuse_original",
+          "split_seed": 4,
+          "phase_seed": 2,
+          "fold": 2
+        },
+        {
+          "enabled": 0,
+          "original_size": 379,
+          "augmented_size": 379,
+          "added_samples": 0,
+          "n_augments": 1,
+          "method": "random_smiles",
+          "descriptor_mode": "reuse_original",
+          "split_seed": 4,
+          "phase_seed": 3,
+          "fold": 3
+        },
+        {
+          "enabled": 0,
+          "original_size": 395,
+          "augmented_size": 395,
+          "added_samples": 0,
+          "n_augments": 1,
+          "method": "random_smiles",
+          "descriptor_mode": "reuse_original",
+          "split_seed": 4,
+          "phase_seed": 4,
+          "fold": 4
+        },
+        {
+          "enabled": 0,
+          "original_size": 379,
+          "augmented_size": 379,
+          "added_samples": 0,
+          "n_augments": 1,
+          "method": "random_smiles",
+          "descriptor_mode": "reuse_original",
+          "split_seed": 4,
+          "phase_seed": 5,
+          "fold": 5
+        }
+      ],
+      "tuning_records": [
+        {
+          "model": "LR",
+          "search_type": "grid",
+          "best_score": 0.9478466972073111,
+          "best_params": {
+            "C": 1.0,
+            "penalty": "l2",
+            "solver": "liblinear"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 1,
+          "split_seed": 4
+        },
+        {
+          "model": "RFC",
+          "search_type": "grid",
+          "best_score": 0.9545090128210333,
+          "best_params": {
+            "max_depth": null,
+            "min_samples_leaf": 1,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 1,
+          "split_seed": 4
+        },
+        {
+          "model": "SVC",
+          "search_type": "grid",
+          "best_score": 0.9641190627124132,
+          "best_params": {
+            "C": 10.0,
+            "gamma": 0.01,
+            "kernel": "rbf"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 1,
+          "split_seed": 4
+        },
+        {
+          "model": "XGBC",
+          "search_type": "grid",
+          "best_score": 0.9686998470885939,
+          "best_params": {
+            "learning_rate": 0.1,
+            "max_depth": 3,
+            "n_estimators": 200,
+            "subsample": 1.0
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 1,
+          "split_seed": 4
+        },
+        {
+          "model": "ETC",
+          "search_type": "grid",
+          "best_score": 0.9604535087911047,
+          "best_params": {
+            "max_depth": 10,
+            "min_samples_leaf": 1,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 1,
+          "split_seed": 4
+        },
+        {
+          "model": "MLP",
+          "search_type": "grid",
+          "best_score": 0.9465658169622365,
+          "best_params": {
+            "alpha": 0.001,
+            "hidden_layer_sizes": [
+              256,
+              128
+            ],
+            "learning_rate_init": 0.0005
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 1,
+          "split_seed": 4
+        },
+        {
+          "model": "LR",
+          "search_type": "grid",
+          "best_score": 0.9311049454793249,
+          "best_params": {
+            "C": 1.0,
+            "penalty": "l2",
+            "solver": "liblinear"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 2,
+          "split_seed": 4
+        },
+        {
+          "model": "RFC",
+          "search_type": "grid",
+          "best_score": 0.9321757730986877,
+          "best_params": {
+            "max_depth": null,
+            "min_samples_leaf": 1,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 2,
+          "split_seed": 4
+        },
+        {
+          "model": "SVC",
+          "search_type": "grid",
+          "best_score": 0.9270718952881317,
+          "best_params": {
+            "C": 10.0,
+            "gamma": 0.01,
+            "kernel": "rbf"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 2,
+          "split_seed": 4
+        },
+        {
+          "model": "XGBC",
+          "search_type": "grid",
+          "best_score": 0.9264625415134352,
+          "best_params": {
+            "learning_rate": 0.03,
+            "max_depth": 6,
+            "n_estimators": 200,
+            "subsample": 1.0
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 2,
+          "split_seed": 4
+        },
+        {
+          "model": "ETC",
+          "search_type": "grid",
+          "best_score": 0.9438219437381553,
+          "best_params": {
+            "max_depth": null,
+            "min_samples_leaf": 1,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 2,
+          "split_seed": 4
+        },
+        {
+          "model": "MLP",
+          "search_type": "grid",
+          "best_score": 0.9356201997090775,
+          "best_params": {
+            "alpha": 0.0001,
+            "hidden_layer_sizes": [
+              512,
+              256
+            ],
+            "learning_rate_init": 0.001
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 2,
+          "split_seed": 4
+        },
+        {
+          "model": "LR",
+          "search_type": "grid",
+          "best_score": 0.9266407388824279,
+          "best_params": {
+            "C": 0.1,
+            "penalty": "l2",
+            "solver": "liblinear"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 3,
+          "split_seed": 4
+        },
+        {
+          "model": "RFC",
+          "search_type": "grid",
+          "best_score": 0.9344082916185341,
+          "best_params": {
+            "max_depth": null,
+            "min_samples_leaf": 1,
+            "n_estimators": 200
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 3,
+          "split_seed": 4
+        },
+        {
+          "model": "SVC",
+          "search_type": "grid",
+          "best_score": 0.9190722200830018,
+          "best_params": {
+            "C": 1.0,
+            "gamma": "scale",
+            "kernel": "rbf"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 3,
+          "split_seed": 4
+        },
+        {
+          "model": "XGBC",
+          "search_type": "grid",
+          "best_score": 0.9215744705861507,
+          "best_params": {
+            "learning_rate": 0.03,
+            "max_depth": 3,
+            "n_estimators": 500,
+            "subsample": 1.0
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 3,
+          "split_seed": 4
+        },
+        {
+          "model": "ETC",
+          "search_type": "grid",
+          "best_score": 0.9536934505712583,
+          "best_params": {
+            "max_depth": 10,
+            "min_samples_leaf": 4,
+            "n_estimators": 200
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 3,
+          "split_seed": 4
+        },
+        {
+          "model": "MLP",
+          "search_type": "grid",
+          "best_score": 0.9330256421226771,
+          "best_params": {
+            "alpha": 0.0001,
+            "hidden_layer_sizes": [
+              256,
+              128
+            ],
+            "learning_rate_init": 0.0005
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 3,
+          "split_seed": 4
+        },
+        {
+          "model": "LR",
+          "search_type": "grid",
+          "best_score": 0.9331794738122278,
+          "best_params": {
+            "C": 0.1,
+            "penalty": "l2",
+            "solver": "liblinear"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 4,
+          "split_seed": 4
+        },
+        {
+          "model": "RFC",
+          "search_type": "grid",
+          "best_score": 0.9415549428741672,
+          "best_params": {
+            "max_depth": 10,
+            "min_samples_leaf": 1,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 4,
+          "split_seed": 4
+        },
+        {
+          "model": "SVC",
+          "search_type": "grid",
+          "best_score": 0.9285058801493936,
+          "best_params": {
+            "C": 1.0,
+            "gamma": "scale",
+            "kernel": "rbf"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 4,
+          "split_seed": 4
+        },
+        {
+          "model": "XGBC",
+          "search_type": "grid",
+          "best_score": 0.945652962327613,
+          "best_params": {
+            "learning_rate": 0.03,
+            "max_depth": 6,
+            "n_estimators": 200,
+            "subsample": 0.8
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 4,
+          "split_seed": 4
+        },
+        {
+          "model": "ETC",
+          "search_type": "grid",
+          "best_score": 0.9497660980440017,
+          "best_params": {
+            "max_depth": null,
+            "min_samples_leaf": 4,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 4,
+          "split_seed": 4
+        },
+        {
+          "model": "MLP",
+          "search_type": "grid",
+          "best_score": 0.94469500760925,
+          "best_params": {
+            "alpha": 0.001,
+            "hidden_layer_sizes": [
+              512,
+              256
+            ],
+            "learning_rate_init": 0.0005
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 4,
+          "split_seed": 4
+        },
+        {
+          "model": "LR",
+          "search_type": "grid",
+          "best_score": 0.9516841605601177,
+          "best_params": {
+            "C": 1.0,
+            "penalty": "l2",
+            "solver": "liblinear"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 5,
+          "split_seed": 4
+        },
+        {
+          "model": "RFC",
+          "search_type": "grid",
+          "best_score": 0.9717282877425242,
+          "best_params": {
+            "max_depth": 10,
+            "min_samples_leaf": 1,
+            "n_estimators": 500
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 5,
+          "split_seed": 4
+        },
+        {
+          "model": "SVC",
+          "search_type": "grid",
+          "best_score": 0.9664390885735795,
+          "best_params": {
+            "C": 1.0,
+            "gamma": "scale",
+            "kernel": "rbf"
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 5,
+          "split_seed": 4
+        },
+        {
+          "model": "XGBC",
+          "search_type": "grid",
+          "best_score": 0.9735968215446783,
+          "best_params": {
+            "learning_rate": 0.03,
+            "max_depth": 6,
+            "n_estimators": 500,
+            "subsample": 1.0
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 5,
+          "split_seed": 4
+        },
+        {
+          "model": "ETC",
+          "search_type": "grid",
+          "best_score": 0.9710046743411694,
+          "best_params": {
+            "max_depth": 10,
+            "min_samples_leaf": 4,
+            "n_estimators": 200
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 5,
+          "split_seed": 4
+        },
+        {
+          "model": "MLP",
+          "search_type": "grid",
+          "best_score": 0.9559522616174814,
+          "best_params": {
+            "alpha": 0.001,
+            "hidden_layer_sizes": [
+              256,
+              128
+            ],
+            "learning_rate_init": 0.0005
+          },
+          "n_iter": null,
+          "cv_folds": 3,
+          "cv_type": "grouped",
+          "stage": "cv",
+          "fold": 5,
+          "split_seed": 4
+        }
+      ],
+      "fp_keep_dims": [
+        136,
+        149,
+        125,
+        136,
+        128
+      ]
+    },
+    "final_dev": {
+      "enabled": 0,
+      "original_size": 465,
+      "augmented_size": 465,
+      "added_samples": 0,
+      "n_augments": 1,
+      "method": "random_smiles",
+      "descriptor_mode": "reuse_original",
+      "split_seed": 4,
+      "phase_seed": 9999
+    }
+  },
+  "modeling": {
+    "thresholding": {
+      "enabled": 1,
+      "classification_threshold": 0.5,
+      "tune_in_cv": 0,
+      "tune_metric": "mcc",
+      "candidate_thresholds": [
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.65,
+        0.7
+      ],
+      "selection_rule": "max_f1",
+      "curve_points": 201
+    },
+    "hyperparameter_tuning": {
+      "enabled": 1,
+      "search_type": "grid",
+      "target_models": [
+        "LR",
+        "RFC",
+        "SVC",
+        "XGBC",
+        "ETC",
+        "MLP"
+      ],
+      "n_iter": 2,
+      "cv_folds": 3,
+      "scoring": "roc_auc",
+      "n_jobs": -1
+    }
+  },
+  "fp_mask_applied_before_concat": true
+}

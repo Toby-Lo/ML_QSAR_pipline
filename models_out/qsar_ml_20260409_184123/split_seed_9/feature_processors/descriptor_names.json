@@ -1,0 +1,22 @@
+[
+  "MolWt",
+  "MolLogP",
+  "NumHDonors",
+  "NumHAcceptors",
+  "NumRotatableBonds",
+  "TPSA",
+  "HeavyAtomCount",
+  "NumValenceElectrons",
+  "NumAliphaticRings",
+  "NumAromaticRings",
+  "FractionCSP3",
+  "RingCount",
+  "LabuteASA",
+  "VSA_EState1",
+  "VSA_EState2",
+  "SlogP_VSA1",
+  "SlogP_VSA2",
+  "SMR_VSA1",
+  "SMR_VSA2",
+  "EState_VSA1"
+]

@@ -1,0 +1,81 @@
+# Configuration for ./scripts/step10_qsar_ml.py
+# Use this file via `--config config/nsd2_ml.yaml`.
+
+# python ./scripts/step10_qsar_ml.py --config config/nsd2_ml.yaml
+#
+# All fields map directly to MLQSARConfig attributes:
+#   input_path: path to the cleaned CSV/Parquet input data
+#   output_root: base directory for run outputs (new timestamp sub-folder added automatically)
+#   task: "classification" (only supported target currently)
+#   smiles_column / label_column / id_column: column names in the input file
+#   seed: base seed (used when split_seeds is empty)
+#   split_seeds: list of seeds used for Dev/External splits (default [42,43,44])
+#   folds: number of scaffold-grouped CV folds on the Development set
+#   selected_models: comma-separated subset of [LR, RFC, SVC, XGBC, ETC, MLP]
+#   descriptor_names: list of RDKit descriptors appended to fingerprints
+#   split_method: one of scaffold / stratified / random for the Dev/External split
+#   test_size: fraction assigned to the External test set
+#   variance_threshold: fingerprint variance threshold before correlation filtering
+#   correlation_threshold: absolute Pearson threshold for dropping correlated fingerprint bits
+#   hyperparameter_tuning: optional RandomizedSearchCV / GridSearchCV settings
+#   thresholding: decision threshold strategy (OOF-based lock for external evaluation)
+
+input_path: ./data/NSD2/NSD2_final_ic50.csv
+#input_path: ./data/test_data_complex_with_fingerprints.csv # for smoke test only
+output_root: models_out
+task: classification
+smiles_column: smiles
+label_column: label
+id_column: id
+seed: 42
+split_seeds: [4, 9, 26]
+folds: 5
+selected_models: ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"]
+descriptor_names:
+  - MolWt
+  - MolLogP
+  - NumHDonors
+  - NumHAcceptors
+  - NumRotatableBonds
+  - TPSA
+  - HeavyAtomCount
+  - NumValenceElectrons
+  - NumAliphaticRings
+  - NumAromaticRings
+  - FractionCSP3
+  - RingCount
+  - LabuteASA
+  - VSA_EState1
+  - VSA_EState2
+  - SlogP_VSA1
+  - SlogP_VSA2
+  - SMR_VSA1
+  - SMR_VSA2
+  - EState_VSA1
+
+split_method: scaffold
+test_size: 0.2
+variance_threshold: 0.05
+correlation_threshold: 0.9
+
+augmentation:
+  use_smiles_augmentation: false
+  n_augments: 1
+  method: "random_smiles"     # currently supports: "random_smiles"
+  apply_to: "train_only"      # currently supports: "train_only"
+  descriptor_mode: "reuse_original"  # options: "reuse_original" (default) | "recompute"
+
+hyperparameter_tuning:
+  enabled: true            # true: perform hyperparameter tuning; false: skip and use default parameters
+  search_type: "grid"       # options: "random" | "grid"
+  target_models: ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"]
+  n_iter: 2
+  cv_folds: 3
+  scoring: "roc_auc"
+  n_jobs: -1
+
+thresholding:
+  enabled: true
+  classification_threshold: 0.5   # fallback threshold when OOF selection is unavailable
+  selection_rule: "max_f1"        # options: "max_f1" | "youden_j"
+  curve_points: 201               # number of threshold points in threshold_curves_data.csv
