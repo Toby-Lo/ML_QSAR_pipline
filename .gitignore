@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+*.png
+*.jpg
+*.svg
+*.txt
+*.csv
+*.smi
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.env
+venv/
+
+# Data files
+data/
+
+# Output files
+models_out/
+
