@@ -6,7 +6,7 @@ both as a CLI tool and in an interactive editor.
 
 Example:
   python scripts/step21_model_robustness.py \
-    --run-dir models_out/qsar_ml_20260409_214751 \
+    --run-dir models_out/qsar_ml_20260409_222051 \
     --split-seed 42 \
     --models LR,RFC,SVC,XGBC,ETC,MLP \
     --n-permutations 200 \
@@ -51,7 +51,7 @@ PLOT_CONFIG: Dict[str, Any] = {
     "interactive_backend": "Qt5Agg",
     "use_interactive": True,
     "display_plots": True,
-    "font_family": "Cambria",
+    "font_family": "Times New Roman",
     "font_size": 11,
     "title_fontsize": 14,
     "label_fontsize": 12,
@@ -90,6 +90,29 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 NON_TREE_MODELS = {"LR", "SVC", "MLP"}
+
+# %%
+"""
+Config cell (interactive)
+-------------------------
+
+Edit this cell when working in an IDE/notebook. CLI execution is controlled by flags.
+"""
+
+USER_CONFIG: Dict[str, Any] = {
+    "run_dir": Path("models_out/qsar_ml_20260409_214751"),
+    "split_seed": 42,
+    "models": ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"],
+    "task": "classification",
+    "n_permutations": 200,
+    "random_state": 42,
+    "input_path": None,  # Optional source table for fallback rebuild
+    "id_column": "id",
+    "smiles_column": "smiles",
+    "label_column": "label",
+    # Compute/export only; re-run figures in the plotting cell below.
+    "no_plots": True,
+}
 
 
 # %%
@@ -588,6 +611,7 @@ def run_robustness(config: Dict[str, Any]) -> Dict[str, Any]:
     ensure_dir(out_dir)
     fig_dir = run_dir / "figures" / "robustness" / f"split_seed_{split_seed}"
     ensure_dir(fig_dir)
+    make_plots = bool(config.get("make_plots", True))
 
     task = str(config["task"]).lower()
     metric_label = "ROC-AUC" if task == "classification" else "R2"
@@ -612,28 +636,30 @@ def run_robustness(config: Dict[str, Any]) -> Dict[str, Any]:
         (model_out_dir / "y_scrambling_summary.json").write_text(json.dumps(summary, indent=2))
         summaries.append(summary)
 
-        model_fig_dir = fig_dir / model_key
-        ensure_dir(model_fig_dir)
-        plot_metric_histogram(
-            model_key=model_key,
-            permutation_metrics=perm_df["metric"].to_numpy(dtype=float),
-            actual_metric=float(summary["actual_metric"]),
-            out_base=model_fig_dir / "y_scrambling_histogram",
-            metric_label=metric_label,
-            stat_annotations=summary,
-        )
-        plot_corr_scatter(
-            model_key=model_key,
-            corr=perm_df["y_corr"].to_numpy(dtype=float),
-            metric=perm_df["metric"].to_numpy(dtype=float),
-            out_base=model_fig_dir / "y_scrambling_corr_scatter",
-            metric_label=metric_label,
-        )
+        if make_plots:
+            model_fig_dir = fig_dir / model_key
+            ensure_dir(model_fig_dir)
+            plot_metric_histogram(
+                model_key=model_key,
+                permutation_metrics=perm_df["metric"].to_numpy(dtype=float),
+                actual_metric=float(summary["actual_metric"]),
+                out_base=model_fig_dir / "y_scrambling_histogram",
+                metric_label=metric_label,
+                stat_annotations=summary,
+            )
+            plot_corr_scatter(
+                model_key=model_key,
+                corr=perm_df["y_corr"].to_numpy(dtype=float),
+                metric=perm_df["metric"].to_numpy(dtype=float),
+                out_base=model_fig_dir / "y_scrambling_corr_scatter",
+                metric_label=metric_label,
+            )
 
     summary_df = pd.DataFrame(summaries).sort_values("model").reset_index(drop=True)
     summary_df.to_csv(out_dir / "y_scrambling_summary.csv", index=False)
     logger.info(f"Saved summary table: {out_dir / 'y_scrambling_summary.csv'}")
-    logger.info(f"Saved figures under: {fig_dir}")
+    if make_plots:
+        logger.info(f"Saved figures under: {fig_dir}")
     return {"summary": summary_df, "out_dir": out_dir, "fig_dir": fig_dir}
 
 
@@ -652,6 +678,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-column", default="label")
     parser.add_argument("--no-display", action="store_true", help="Disable interactive plot display")
     parser.add_argument("--non-interactive", action="store_true", help="Force non-interactive backend")
+    parser.add_argument("--no-plots", action="store_true", help="Compute/export only; skip saving figures")
     return parser.parse_args()
 
 
@@ -673,9 +700,165 @@ def main() -> None:
         "id_column": args.id_column,
         "smiles_column": args.smiles_column,
         "label_column": args.label_column,
+        "make_plots": not bool(args.no_plots),
     }
     run_robustness(config)
 
 
 if __name__ == "__main__":
     main()
+
+
+# %%
+# Plotting-only cell (interactive)
+#
+# This block is intentionally self-contained so you can run ONLY this cell in an IDE.
+try:
+    from IPython import get_ipython  # type: ignore
+
+    _IN_IPYTHON = get_ipython() is not None
+except Exception:
+    _IN_IPYTHON = False
+
+if _IN_IPYTHON:
+    from pathlib import Path
+    from typing import Any, Dict
+
+    import numpy as np
+    import pandas as pd
+    from matplotlib import pyplot as plt
+    import json
+
+    PLOT_STYLE: Dict[str, Any] = {
+        "font_family": "Times New Roman",
+        "font_size": 11,
+        "dpi": 600,
+        "grid_alpha": 0.2,
+        "axes_linewidth": 1.2,
+    }
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": [PLOT_STYLE["font_family"]],
+            "font.size": PLOT_STYLE["font_size"],
+            "figure.dpi": PLOT_STYLE["dpi"],
+            "savefig.dpi": PLOT_STYLE["dpi"],
+            "axes.linewidth": PLOT_STYLE["axes_linewidth"],
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.linestyle": ":",
+            "grid.alpha": PLOT_STYLE["grid_alpha"],
+        }
+    )
+
+    # --- Inputs (edit these) ---
+    RUN_DIR = Path("../models_out/qsar_ml_20260409_222051") ### relative path because in notebook
+    SPLIT_SEED = 42
+    MODEL_KEY = "SVC"
+    METRIC_LABEL = "ROC-AUC"  # for axis labels only
+
+    MODEL_DIR = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "robustness" / MODEL_KEY
+    PERM_CSV = MODEL_DIR / "y_scrambling_permutations.csv"
+    SUMMARY_JSON = MODEL_DIR / "y_scrambling_summary.json"
+    if not PERM_CSV.exists() or not SUMMARY_JSON.exists():
+        raise FileNotFoundError(f"Missing exports under: {MODEL_DIR}")
+
+    perm = pd.read_csv(PERM_CSV)
+    summary = json.loads(SUMMARY_JSON.read_text())
+    actual_metric = float(summary.get("actual_metric", np.nan))
+
+    def _save(fig, path_base: Path, close=True):
+        fig.savefig(path_base.with_suffix(".png"))
+        fig.savefig(path_base.with_suffix(".svg"))
+        if close:
+            plt.close(fig)
+
+    print(f"[INFO] Saving to: {MODEL_DIR}")
+
+    # 1. Permutation histogram
+    values = perm["metric"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(4.6, 3.2))
+
+    ax.hist(
+        values,
+        bins=24,
+        density=False,
+        color="#4C72B0",
+        alpha=0.65,
+        edgecolor="none"
+    )
+
+    # Actual metric line
+    if not np.isnan(actual_metric):
+        ax.axvline(
+            actual_metric,
+            color="#C44E52",
+            linestyle="--",
+            linewidth=1.6,
+            label=f"Actual ({actual_metric:.3f})",
+            zorder=3
+        )
+        ax.legend(loc="upper left",
+                  frameon=True,
+                  facecolor="white",
+                  edgecolor="0.8",
+                  framealpha=0.9,
+                  fontsize=10
+                  )
+
+
+    ax.set_xlabel(METRIC_LABEL)
+    ax.set_ylabel("Count")
+
+    # 去掉冗余标题?
+    # ax.set_title(...)
+
+    plt.tight_layout()
+    plt.show()
+    _save(fig, MODEL_DIR / "y_scrambling_hist")
+
+    # 2. Correlation scatter + trend line
+    if {"y_corr", "metric"}.issubset(set(perm.columns)):
+
+        x = perm["y_corr"].astype(float).to_numpy()
+        y = perm["metric"].astype(float).to_numpy()
+
+        fig, ax = plt.subplots(figsize=(4.2, 3.2))
+
+        # scatter
+        ax.scatter(
+            x, y,
+            s=18,
+            alpha=0.6,
+            color="#4C72B0"
+        )
+
+        #  Trend line
+        if len(x) > 2:
+            coef = np.polyfit(x, y, 1)
+            xx = np.linspace(x.min(), x.max(), 100)
+            yy = coef[0] * xx + coef[1]
+
+            ax.plot(
+                xx, yy,
+                color="#C44E52",
+                linewidth=1.8,
+                label="Trend"
+            )
+            ax.legend(frameon=False)
+
+        ax.set_xlabel("corr(y_perm, y_true)")
+        ax.set_ylabel(METRIC_LABEL)
+
+        plt.tight_layout()
+        plt.show()  
+        _save(fig, MODEL_DIR / "y_scrambling_corr")
+
+    else:
+        print("[WARN] Missing y_corr column, skip scatter plot")
+
+    print("[DONE] All figures saved.")
+# %%

@@ -2,7 +2,7 @@
 
 Usage:
   python scripts/step20_calibration.py \
-    --run-dir models_out/qsar_ml_20260409_214751 \
+    --run-dir models_out/qsar_ml_20260409_222051 \
     --input data/test_data_feature_fingerprint.csv \
     --methods both \
     --calibration-source dev
@@ -18,6 +18,7 @@ options:
     method="sigmoid"; "isotonic"; or "both" 
 """
 
+# %%
 from __future__ import annotations
 
 import argparse
@@ -50,6 +51,31 @@ except ImportError:
     _MORGAN_GENERATOR_AVAILABLE = False
 
 
+# %%
+"""
+Config cell (interactive)
+-------------------------
+
+Edit this cell when working in an IDE/notebook. CLI execution is controlled by flags.
+"""
+
+USER_CONFIG: Dict[str, Any] = {
+    "run_dir": Path("models_out/qsar_ml_20260409_214751"),
+    "input": Path("data/test_data_feature_fingerprint.csv"),
+    "methods": "both",  # sigmoid | isotonic | both
+    "calibration_source": "dev",  # dev | external
+    "cv_folds": 5,
+    "split_seeds": None,  # e.g. "42,43,44"
+    "id_column": "id",
+    "smiles_column": "smiles",
+    "label_column": "label",
+    "bins": 10,
+    "random_state": 42,
+    # Compute/export only. You can re-run plots in the plotting cell below.
+    "no_plots": True,
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calibrate trained QSAR models from step10 outputs")
     parser.add_argument("--run-dir", type=Path, required=True, help="Run directory from step10 (contains split_seed_*)")
@@ -63,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-column", default="label")
     parser.add_argument("--bins", type=int, default=10, help="Number of bins for reliability curve")
     parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--no-plots", action="store_true", help="Skip writing reliability plot figures")
     return parser.parse_args()
 
 
@@ -329,16 +356,17 @@ def main() -> None:
                 frac_raw, mean_raw = calibration_curve(y_cal, raw_prob, n_bins=args.bins, strategy="quantile")
                 frac_cal, mean_cal = calibration_curve(y_cal, cal_prob, n_bins=args.bins, strategy="quantile")
 
-                reliability_plot(
-                    y_true=y_cal,
-                    y_prob_raw=raw_prob,
-                    y_prob_cal=cal_prob,
-                    title=f"{split_dir.name} | {model_key} | {method}",
-                    out_png_path=calib_out_dir / "reliability_plot.png",
-                    out_png_path_extra=figure_out_dir / "reliability_plot.png",
-                    out_svg_path=figure_out_dir / "reliability_plot.svg",
-                    n_bins=args.bins,
-                )
+                if not args.no_plots:
+                    reliability_plot(
+                        y_true=y_cal,
+                        y_prob_raw=raw_prob,
+                        y_prob_cal=cal_prob,
+                        title=f"{split_dir.name} | {model_key} | {method}",
+                        out_png_path=calib_out_dir / "reliability_plot.png",
+                        out_png_path_extra=figure_out_dir / "reliability_plot.png",
+                        out_svg_path=figure_out_dir / "reliability_plot.svg",
+                        n_bins=args.bins,
+                    )
 
                 # Different models/methods can yield different effective bin counts.
                 # Build the table with Series so mismatched lengths align safely by index.
@@ -385,3 +413,132 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# %%
+# ##################
+# Plotting-only cell (interactive)
+#
+# Use this to iterate on figure styling without re-running calibration.
+#
+# It is intentionally self-contained so you can run ONLY this cell in an IDE.
+try:
+    from IPython import get_ipython  # type: ignore
+
+    _IN_IPYTHON = get_ipython() is not None
+except Exception:
+    _IN_IPYTHON = False
+
+if _IN_IPYTHON:
+    from pathlib import Path
+    from typing import Any, Dict
+
+    import numpy as np
+    import pandas as pd
+    from matplotlib import pyplot as plt
+
+    PLOT_STYLE: Dict[str, Any] = {
+        "font_family": "Times New Roman",
+        "font_size": 11,
+        "dpi": 600,
+        "grid_alpha": 0.25,
+        "axes_linewidth": 1.2,
+    }
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": [PLOT_STYLE["font_family"]],
+            "font.size": PLOT_STYLE["font_size"],
+            "figure.dpi": PLOT_STYLE["dpi"],
+            "savefig.dpi": PLOT_STYLE["dpi"],
+            "axes.linewidth": PLOT_STYLE["axes_linewidth"],
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.linestyle": ":",
+            "grid.alpha": PLOT_STYLE["grid_alpha"],
+        }
+    )
+
+    # --- Inputs (edit these) ---
+    RUN_DIR = Path("../models_out/qsar_ml_20260409_214751") ### Relative path if run in IDE
+    SPLIT_SEED = 42
+    MODEL_KEY = "SVC"   ### adjust
+    METHOD = "sigmoid"  # sigmoid | isotonic
+
+    CURVE_CSV = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{METHOD}" / "calibration_curve.csv"
+    if not CURVE_CSV.exists():
+        raise FileNotFoundError(f"Missing calibration curve CSV: {CURVE_CSV}")
+
+    curve = pd.read_csv(CURVE_CSV)
+
+    required = {"mean_pred_raw", "frac_pos_raw", "mean_pred_cal", "frac_pos_cal"}
+    missing = required - set(curve.columns)
+    if missing:
+        raise ValueError(f"calibration_curve.csv missing columns: {sorted(missing)}")
+
+    fig, ax = plt.subplots(figsize=(4.2, 4.2))
+    # Perfect calibration line
+    ax.plot(
+        [0, 1], [0, 1],
+        linestyle="--",
+        color="0.6",
+        linewidth=1.2,
+        label="Perfect calibration",
+        zorder=1
+    )
+
+    # Raw
+    ax.plot(
+        curve["mean_pred_raw"],
+        curve["frac_pos_raw"],
+        linestyle="-",
+        linewidth=1.2,
+        marker="o",
+        markersize=4,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        color="#4C72B0",
+        alpha=0.8,
+        label="Uncalibrated",
+        zorder=2
+    )
+
+    # Calibrated
+    ax.plot(
+        curve["mean_pred_cal"],
+        curve["frac_pos_cal"],
+        linestyle="-",
+        linewidth=2.0,
+        marker="o",
+        markersize=4.5,
+        color="#C44E52",
+        label=f"Calibrated ({METHOD})",
+        zorder=3
+    )
+
+    # Axis refinement
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    ax.set_xlabel("Predicted probability")
+    ax.set_ylabel("Observed frequency")
+
+    # 去掉冗余标题?
+    # ax.set_title(...)
+
+    ax.legend(frameon=False)
+
+    plt.tight_layout()
+
+    # Save (PNG + SVG)
+    out_base = CURVE_CSV.parent / "reliability_plot"
+
+    fig.savefig(out_base.with_suffix(".png"))
+    fig.savefig(out_base.with_suffix(".svg"))
+
+    plt.show()
+
+    print(f"[DONE] Saved to:\n  {out_base}.png\n  {out_base}.svg")
+# %%
