@@ -1582,16 +1582,16 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def feature_fingerprint_output_path(input_path: Path) -> Path:
-    return input_path.with_name(f"{input_path.stem}_feature_fingerprint.csv")
+def fingerprint_descriptor_output_path(input_path: Path) -> Path:
+    return input_path.with_name(f"{input_path.stem}_fingerprint_descriptor.csv")
 
 
-def export_feature_fingerprint_csv(df: pd.DataFrame,
+def export_fingerprint_descriptor_csv(df: pd.DataFrame,
                                    input_path: Path,
                                    fp_matrix: np.ndarray,
                                    desc_matrix: np.ndarray,
                                    descriptor_names: List[str]) -> Path:
-    out_path = feature_fingerprint_output_path(input_path)
+    out_path = fingerprint_descriptor_output_path(input_path)
     export_df = df.copy()
     fp_cols = [f"morgan_{i}" for i in range(fp_matrix.shape[1])]
     for idx, col in enumerate(fp_cols):
@@ -2359,7 +2359,7 @@ def main() -> None:
         logger.info(f"Feature/Fingerprint reuse enabled. Current file: {current_path}")
         print(f"Feature/Fingerprint file (reused): {current_path}")
     else:
-        out_csv = export_feature_fingerprint_csv(
+        out_csv = export_fingerprint_descriptor_csv(
             df=df,
             input_path=base_config.input_path,
             fp_matrix=fp_matrix,

@@ -20,13 +20,12 @@
 #   hyperparameter_tuning: optional RandomizedSearchCV / GridSearchCV settings
 #   thresholding: decision threshold strategy (OOF-based lock for external evaluation)
 
-input_path: ./data/NSD2/NSD2_final_ic50.csv
-#input_path: ./data/test_data_complex_with_fingerprints.csv # for smoke test only
+input_path: ./data/NSD2/nsd2_final_dataset_feature_fingerprint.csv
 output_root: models_out
 task: classification
 smiles_column: smiles
 label_column: label
-id_column: id
+id_column: molecule_chembl_id
 seed: 42
 split_seeds: [4, 9, 26, 123, 256, 999, 2026, 12345, 26535, 31415]
 folds: 5
@@ -73,7 +72,7 @@ hyperparameter_tuning:
   cv_folds: 3
   scoring: "matthews_corrcoef"        # optional: "roc_auc" | "average_precision" | "f1" | "balanced_accuracy" | "matthews_corrcoef"
                              # MCC is supported via "matthews_corrcoef"
-  n_jobs: 4                # optional: -1(use all CPU cores) or a positive integer
+  n_jobs: 16                # optional: -1(use all CPU cores) or a positive integer
 
 thresholding:
   enabled: true
