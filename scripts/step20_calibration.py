@@ -2,8 +2,8 @@
 
 Usage:
   python scripts/step20_calibration.py \
-    --run-dir models_out/qsar_ml_20260409_120000 \
-    --input data/test_data_complex_with_fingerprints.csv \
+    --run-dir models_out/qsar_ml_20260409_214751 \
+    --input data/test_data_feature_fingerprint.csv \
     --methods both \
     --calibration-source dev
 
@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -185,7 +187,9 @@ def reliability_plot(y_true: np.ndarray,
                      y_prob_raw: np.ndarray,
                      y_prob_cal: np.ndarray,
                      title: str,
-                     out_path: Path,
+                     out_png_path: Path,
+                     out_png_path_extra: Optional[Path] = None,
+                     out_svg_path: Optional[Path] = None,
                      n_bins: int = 10) -> None:
     frac_raw, mean_raw = calibration_curve(y_true, y_prob_raw, n_bins=n_bins, strategy="quantile")
     frac_cal, mean_cal = calibration_curve(y_true, y_prob_cal, n_bins=n_bins, strategy="quantile")
@@ -198,7 +202,11 @@ def reliability_plot(y_true: np.ndarray,
     plt.title(title)
     plt.legend(frameon=False)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
+    plt.savefig(out_png_path, dpi=300)
+    if out_png_path_extra is not None:
+        plt.savefig(out_png_path_extra, dpi=300)
+    if out_svg_path is not None:
+        plt.savefig(out_svg_path)
     plt.close()
 
 
@@ -300,6 +308,8 @@ def main() -> None:
             for method in methods:
                 calib_out_dir = split_dir / "calibration" / model_key / f"method_{method}"
                 ensure_dir(calib_out_dir)
+                figure_out_dir = run_dir / "figures" / "calibration" / split_dir.name / model_key / f"method_{method}"
+                ensure_dir(figure_out_dir)
                 try:
                     calibrated = calibrate_one_model(
                         model=model,
@@ -324,24 +334,23 @@ def main() -> None:
                     y_prob_raw=raw_prob,
                     y_prob_cal=cal_prob,
                     title=f"{split_dir.name} | {model_key} | {method}",
-                    out_path=calib_out_dir / "reliability_plot.png",
+                    out_png_path=calib_out_dir / "reliability_plot.png",
+                    out_png_path_extra=figure_out_dir / "reliability_plot.png",
+                    out_svg_path=figure_out_dir / "reliability_plot.svg",
                     n_bins=args.bins,
                 )
 
-                curve_df = pd.DataFrame({
-                    "mean_pred_raw": mean_raw,
-                    "frac_pos_raw": frac_raw,
-                })
-                if len(mean_cal) == len(curve_df):
-                    curve_df["mean_pred_cal"] = mean_cal
-                    curve_df["frac_pos_cal"] = frac_cal
-                else:
-                    curve_df = pd.DataFrame({
-                        "mean_pred_raw": mean_raw,
-                        "frac_pos_raw": frac_raw,
-                        "mean_pred_cal": pd.Series(mean_cal),
-                        "frac_pos_cal": pd.Series(frac_cal),
-                    })
+                # Different models/methods can yield different effective bin counts.
+                # Build the table with Series so mismatched lengths align safely by index.
+                curve_df = pd.concat(
+                    [
+                        pd.Series(mean_raw, name="mean_pred_raw"),
+                        pd.Series(frac_raw, name="frac_pos_raw"),
+                        pd.Series(mean_cal, name="mean_pred_cal"),
+                        pd.Series(frac_cal, name="frac_pos_cal"),
+                    ],
+                    axis=1,
+                )
                 curve_df.to_csv(calib_out_dir / "calibration_curve.csv", index=False)
 
                 metrics = {

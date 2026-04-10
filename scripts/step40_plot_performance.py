@@ -6,7 +6,7 @@ Usage examples:
     python scripts/step40_plot_performance.py --include-external --include-cv --boxplot-stage both
 
 python scripts/step40_plot_performance.py \
-  --base-dir models_out/qsar_ml_20260409_042633 \
+  --base-dir models_out/qsar_ml_20260409_214751 \
   --include-external \
   --include-cv \
   --boxplot-stage both
@@ -33,7 +33,7 @@ from matplotlib import rcParams
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
 
-DEFAULT_METRICS = ["mcc", "f1", "accuracy", "roc_auc", "pr_auc"]
+DEFAULT_METRICS = ["mcc", "f1", "accuracy", "roc_auc", "pr_auc", "ef1", "ef5", "ef10", "nef10"]
 METRIC_ALIASES = {
     "acc": "accuracy",
     "accuracy": "accuracy",
@@ -44,6 +44,11 @@ METRIC_ALIASES = {
     "auc": "roc_auc",
     "roc_auc": "roc_auc",
     "pr_auc": "pr_auc",
+    "ef1": "ef1",
+    "ef5": "ef5",
+    "ef10": "ef10",
+    "nef10": "nef10",
+    "nef": "nef10",
 }
 METRIC_LABELS = {
     "accuracy": "ACC",
@@ -51,8 +56,12 @@ METRIC_LABELS = {
     "recall": "Recall",
     "f1": "F1",
     "mcc": "MCC",
-    "roc_auc": "AUC",
+    "roc_auc": "ROC-AUC",
     "pr_auc": "PR-AUC",
+    "ef1": "EF1",
+    "ef5": "EF5",
+    "ef10": "EF10",
+    "nef10": "NEF10",
 }
 
 
@@ -71,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--boxplot-metrics",
         default=",".join(DEFAULT_METRICS),
-        help="Comma-separated metrics (aliases allowed: ACC/AUC/PR_AUC etc.)",
+        help="Comma-separated metrics (aliases allowed: ACC/AUC/PR_AUC etc.; e.g. mcc,f1,accuracy,roc_auc,pr_auc,ef1,ef5,ef10,nef10)",
     )
     parser.add_argument("--palette", default="colorblind", help="Seaborn palette name")
     parser.add_argument("--dpi", type=int, default=600, help="Figure DPI")
@@ -220,7 +229,7 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         axes[0].plot(
             fpr_grid,
             mean_tpr,
-            label=f"{model} (AUC={entry['roc_auc_mean']:.3f}±{entry['roc_auc_std']:.3f})",
+            label=f"{model} (ROC-AUC={entry['roc_auc_mean']:.3f}±{entry['roc_auc_std']:.3f})",
             linewidth=1.5,
             color=color,
         )
@@ -242,7 +251,7 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         axes[1].plot(
             recall_grid,
             mean_prec,
-            label=f"{model} (AUC={entry['pr_auc_mean']:.3f}±{entry['pr_auc_std']:.3f})",
+            label=f"{model} (PR-AUC={entry['pr_auc_mean']:.3f}±{entry['pr_auc_std']:.3f})",
             linewidth=1.5,
             color=color,
         )

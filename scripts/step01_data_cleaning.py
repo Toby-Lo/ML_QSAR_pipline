@@ -42,14 +42,14 @@ print("Setup complete. Functions defined.")
 # ### 2. Read and Merge Data
 # Adjust paths if necessary
 
-act_path = "../Data/NSD2/NSD2_chembl_act_2124.csv"
-com_path = "../Data/NSD2/NSD2_chembl_com_1265.csv"
+act_path = "../data/NSD2/NSD2_chembl_act_2124.csv"
+com_path = "../data/NSD2/NSD2_chembl_com_1265.csv"
 
 # Check if files exist locally, if not, try the Data folder
 '''
 if not os.path.exists(act_path):
-    act_path = "../Data/NSD2/NSD2_chembl_act_2124.csv"
-    com_path = "../Data/NSD2/NSD2_chembl_com_1265.csv"
+    act_path = "../data/NSD2/NSD2_chembl_act_2124.csv"
+    com_path = "../data/NSD2/NSD2_chembl_com_1265.csv"
 '''
 
 df_act = pd.read_csv(act_path)
@@ -100,8 +100,8 @@ final_df = df_ic50.groupby('canonical_smiles').agg({
     'standard_value': 'median'
 }).reset_index()
 
-# 6. Label activity
-final_df['label'] = np.where(final_df['pIC50'] >= 6.0, 'Active', 'Inactive') ###
+# 6. Label activity #### Adjust Threshold if necessary
+final_df['label'] = np.where(final_df['pIC50'] >= 6.0, '1', '0') ##### 1 for Active, 0 for Inactive
 
 print(f"Unique Molecules after cleaning: {len(final_df)}")
 
@@ -118,105 +118,181 @@ for col in ['MW', 'AlogP']:
 df_props = final_df['canonical_smiles'].apply(lambda x: pd.Series(_compute_properties(x)))
 final_df = pd.concat([final_df.reset_index(drop=True), df_props], axis=1)
 # save
-final_df.to_csv("../Data/JAK3/JAK3_final_dataset.csv", index=False)
+final_df.to_csv("../data/NSD2/nsd2_final_dataset.csv", index=False) ###
 
 print("Properties calculation complete.")
 print(f'Final dataset shape: {final_df.shape}')
-#print(f'Final csv has been saved to ../Data/JAK3/JAK3_final_dataset.csv')
+
 final_df.head(5)
 
 # %%
 # ### 5. Visualization 
+from matplotlib.lines import Line2D
+final_df['label'] = final_df['label'].astype(int)
+final_df['label_name'] = final_df['label'].map({1: 'Active', 0: 'Inactive'})
 # Update Global Matplotlib RC params for Top Journal Style
 mpl.rcParams.update({
     'font.family': 'serif',
-    'font.serif': ['Times New Roman'],
+    'font.serif': ['Times New Roman'],  # 'Cambria'
     'font.size': 11,
-    'axes.titlesize': 12,
-    'axes.labelsize': 11,
-    'xtick.labelsize': 10,
-    'ytick.labelsize': 10,
-    'legend.fontsize': 10,
 
-    # 坐标轴线配置
-    'axes.linewidth': 1.0,       # 轴线粗细
-    'axes.spines.right': False,  # 隐藏右边框
-    'axes.spines.top': False,    # 隐藏上边框
-    'axes.grid': False,          # 彻底关闭网格
+    'axes.linewidth': 1.0,
+    'axes.spines.right': False,
+    'axes.spines.top': False,
+    'axes.grid': False,
 
-    'xtick.direction': 'in',     # 刻度向内
-    'ytick.direction': 'in',
-    'xtick.major.width': 1.0,
-    'ytick.major.width': 1.0,
+    'xtick.direction': 'out', #刻度线朝向
+    'ytick.direction': 'out',
+
     'savefig.dpi': 600,
     'svg.fonttype': 'none'
 })
 
-fig = plt.figure(figsize=(13, 4.5)) 
+fig = plt.figure(figsize=(12.8, 4.5))
 gs = mpl.gridspec.GridSpec(1, 3, width_ratios=[1, 0.8, 1.2])
 
-# 调色盘：深蓝 vs 深红
 color_palette = {'Active': '#28559A', 'Inactive': '#B73131'}
 
 # --- (a) pIC50 Distribution ---
 ax0 = fig.add_subplot(gs[0])
-sns.histplot(final_df['pIC50'], bins=25, kde=True, ax=ax0, 
-             color=color_palette['Active'], alpha=0.6, edgecolor='white', linewidth=0.5)
-# 阈值改为红色################
-ax0.axvline(x=6.0, color='#D62728', linestyle='--', linewidth=1.5, label='Threshold')
-ax0.set_title('pIC50 Distribution', fontweight='bold', pad=15)
-ax0.set_xlabel('pIC50 Value')
-ax0.set_ylabel('Count')
+
+sns.histplot(
+    final_df['pIC50'],
+    bins=25,
+    stat='density',
+    color=color_palette['Active'],
+    alpha=0.7,
+    edgecolor=None,
+    ax=ax0
+)
+
+# threshold line color and value ################
+ax0.axvline(6.0, color='#D62728', linestyle='--', linewidth=1.4)
+
+# legend
+threshold_handle = Line2D(
+    [0], [0],
+    color='#D62728',
+    linestyle='--',
+    linewidth=1.4,
+    label='Threshold:6.0'
+)
+
+ax0.legend(handles=[threshold_handle], frameon=True, loc='upper right')
+
+ax0.set_title('pIC50 Distribution', fontweight='bold', pad=12)
+ax0.set_xlabel('pIC50')
+ax0.set_ylabel('Density')
 ax0.xaxis.set_major_locator(MultipleLocator(1))
-ax0.legend(frameon=False, loc='upper right')
 
 # --- (b) Class Balance ---
 ax1 = fig.add_subplot(gs[1])
-counts = final_df['label'].value_counts()
+
+counts = final_df['label_name'].value_counts().reindex(['Active', 'Inactive'])
 total = counts.sum()
-sns.countplot(x='label', data=final_df, order=['Active', 'Inactive'], ax=ax1, 
-              hue='label', palette=color_palette, legend=False, alpha=0.85, edgecolor='black', linewidth=1.2)
 
-for i, count in enumerate(counts.reindex(['Active', 'Inactive'])):
-    ax1.text(i, count + (total*0.03), f'{100*count/total:.1f}%', ha='center', va='bottom', 
-             fontsize=10, fontweight='bold')
+sns.barplot(
+    x=counts.index,
+    y=counts.values,
+    palette=color_palette,
+    ax=ax1
+)
 
-ax1.set_title('Classification', fontweight='bold', pad=15)
-ax1.set_xlabel('Biological Activity')
+for i, count in enumerate(counts):
+    ax1.text(
+        i,
+        count * 1.02,
+        f'{count}\n({100*count/total:.1f}%)',
+        ha='center',
+        va='bottom',
+        fontsize=9
+    )
+
+ax1.set_title('Classification', fontweight='bold', pad=12)
+ax1.set_xlabel('')
 ax1.set_ylabel('Molecule Count')
-ax1.set_ylim(0, total * 1.15)
 
 # --- (c) Property Space (MW vs AlogP) ---
 ax2 = fig.add_subplot(gs[2])
-sns.scatterplot(x='MW', y='AlogP', hue='label', data=final_df,
-                hue_order=['Active', 'Inactive'], palette=color_palette,
-                ax=ax2, s=45, alpha=0.7, edgecolor='white', linewidth=0.6)
+
+sns.scatterplot(
+    x='MW',
+    y='AlogP',
+    hue='label_name',
+    data=final_df,
+    palette=color_palette,
+    hue_order=['Active', 'Inactive'],
+    s=25,
+    alpha=0.6,
+    edgecolor=None,
+    ax=ax2,
+    legend=False
+)
 
 # Lipinski 阈值也改为红色虚线
-ax2.axvline(x=500, color='#D62728', linestyle=':', linewidth=1.2, label='MW = 500')
-ax2.axhline(y=5, color='#D62728', linestyle='-.', linewidth=1.2, label='AlogP = 5')
+ax2.axvline(500, color='#D62728', linestyle='--', linewidth=1.2)
+ax2.axhline(5, color='#D62728', linestyle=':', linewidth=1.2)
 
-ax2.set_title('Chemical Property Space', fontweight='bold', pad=15)
+# custom legend（统一在一个框里）
+legend_elements = [
+    Line2D([0], [0], marker='o', color='w', label='Active',
+           markerfacecolor=color_palette['Active'], markersize=6),
+
+    Line2D([0], [0], marker='o', color='w', label='Inactive',
+           markerfacecolor=color_palette['Inactive'], markersize=6),
+
+    Line2D([0], [0], color='#D62728', lw=1.2, linestyle='--',
+           label='MW = 500'),
+
+    Line2D([0], [0], color='#D62728', lw=1.2, linestyle=':',
+           label='AlogP = 5'),
+]
+
+ax2.legend(
+    handles=legend_elements,
+    frameon=True,
+    loc='lower right',
+    #title='Annotations'
+)
+
+ax2.set_title('Chemical Property Space', fontweight='bold', pad=12)
 ax2.set_xlabel('Molecular Weight (Da)')
-ax2.set_ylabel('Calculated AlogP')
-ax2.legend(frameon=False, loc='upper left', bbox_to_anchor=(1, 1), title='Activity')
+ax2.set_ylabel('AlogP')
 
-# 添加子图标签 (a), (b), (c)
 for n, ax in enumerate([ax0, ax1, ax2]):
-    ax.text(-0.12, 1.12, f'({chr(97+n)})', transform=ax.transAxes, 
-            fontsize=14, fontweight='bold', va='top')
-    # 确保坐标轴线清晰展示
-    ax.spines['left'].set_visible(True)
-    ax.spines['bottom'].set_visible(True)
+    ax.text(-0.1, 1.05, f'({chr(97+n)})',
+            transform=ax.transAxes,
+            fontsize=13, fontweight='bold')
+    
+    for spine in ['left', 'bottom']:
+        ax.spines[spine].set_visible(True)
+        ax.spines[spine].set_linewidth(1.2)
+        ax.spines[spine].set_color('black')
 
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+
+    ax.xaxis.set_ticks_position('bottom')
+    ax.yaxis.set_ticks_position('left')
+
+    ax.tick_params(
+        axis='both',
+        which='both',
+        direction='out',   # 向外
+        length=4,          # 刻度长度
+        width=1.0,         # 刻度粗细
+        colors='black',    # 颜色
+        top=False,
+        right=False
+    )
 plt.tight_layout()
 
-# export
-output_dir = Path("../Data/NSD2/")
+###################### export
+output_dir = Path("../data/NSD2/")
 output_dir.mkdir(parents=True, exist_ok=True)
-######################
-fig.savefig(output_dir / "NSD2_EDA.png")#########
-fig.savefig(output_dir / "NSD2_EDA.svg")########
+
+fig.savefig(output_dir / "NSD2_EDA.png", bbox_inches='tight')
+fig.savefig(output_dir / "NSD2_EDA.svg", bbox_inches='tight')
 ######################
 
 plt.show()

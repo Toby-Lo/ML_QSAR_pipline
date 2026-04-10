@@ -28,7 +28,7 @@ smiles_column: smiles
 label_column: label
 id_column: id
 seed: 42
-split_seeds: [4, 9, 26]
+split_seeds: [4, 9, 26, 123, 256, 999, 2026, 12345, 26535, 31415]
 folds: 5
 selected_models: ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"]
 descriptor_names:
@@ -59,7 +59,7 @@ variance_threshold: 0.05
 correlation_threshold: 0.9
 
 augmentation:
-  use_smiles_augmentation: false
+  use_smiles_augmentation: false # smiles augmentation is not commended for fingerprint-based models, but can be used for descriptor-only models
   n_augments: 1
   method: "random_smiles"     # currently supports: "random_smiles"
   apply_to: "train_only"      # currently supports: "train_only"
@@ -69,13 +69,14 @@ hyperparameter_tuning:
   enabled: true            # true: perform hyperparameter tuning; false: skip and use default parameters
   search_type: "grid"       # options: "random" | "grid"
   target_models: ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"]
-  n_iter: 2
+  n_iter: 2                 # optional; used when search_type="random" (e.g. 20/50/100)
   cv_folds: 3
-  scoring: "roc_auc"
-  n_jobs: -1
+  scoring: "matthews_corrcoef"        # optional: "roc_auc" | "average_precision" | "f1" | "balanced_accuracy" | "matthews_corrcoef"
+                             # MCC is supported via "matthews_corrcoef"
+  n_jobs: 4                # optional: -1(use all CPU cores) or a positive integer
 
 thresholding:
   enabled: true
   classification_threshold: 0.5   # fallback threshold when OOF selection is unavailable
   selection_rule: "max_f1"        # options: "max_f1" | "youden_j"
-  curve_points: 201               # number of threshold points in threshold_curves_data.csv
+  curve_points: 201               # optional: threshold grid points for curve export (e.g. 101/201/401)

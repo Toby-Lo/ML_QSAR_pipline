@@ -1,191 +1,379 @@
-# %% 
-# 1. Import Libraries and Configuration
+# %%
+# 1. Import Libraries
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from sklearn.decomposition import PCA  # 新增 PCA
+
+from rdkit import Chem, DataStructs
+from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
+
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-import os
+from sklearn.preprocessing import StandardScaler
 
-# Set global font to Times New Roman
-plt.rcParams['font.family'] = 'serif'
-plt.rcParams['font.serif'] = ['Times New Roman']
-sns.set_theme(style="white", font='Times New Roman') # 改为 white 风格更学术
+from pathlib import Path
 
-# %% 
-# 2. Load Data and Process Fingerprints
-file_path = '../Data/NSD2/NSD2_final_ic50_with_fingerprints.csv'  ###### Adjust this path as needed
+# %%
+# 2. Style & Output Config
+sns.set_theme(style="white")
+
+plt.rcParams.update({
+    'font.family': 'serif',
+    'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+    'svg.fonttype': 'none',   # 保持字体可编辑
+})
+
+# 输出目录
+output_dir = Path("../data/NSD2/cluster")
+output_dir.mkdir(parents=True, exist_ok=True)
+
+# %%
+# 3. Load Data
+file_path = '../data/NSD2/nsd2_final_dataset.csv'
 df = pd.read_csv(file_path)
-print(f"Dataset loaded with shape: {df.shape}")
 
-# 生成或提取指纹
-fp_cols = [c for c in df.columns if c.startswith('morgan_')]
-if len(fp_cols) >= 2048:
-    X = df[fp_cols].values
-else:
-    def get_fp(smile):
-        mol = Chem.MolFromSmiles(smile)
-        return np.array(AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048))
-    X = np.array([get_fp(s) for s in df['smiles']])
+df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(0).astype(int)
 
-X = X.astype(int)
-print(f"Data matrix shape: {X.shape}")
+print(f"Dataset loaded: {df.shape}")
 
-# %% 
-# 3. Two-Step Dimension Reduction: PCA then t-SNE
-print("Step 1: Running PCA to reduce noise (Keeping 50 components)...")
-# 先用 PCA 降到 50 维，这是处理高维指纹的 standard protocol
+# %%
+# 4. Morgan Fingerprints（新API）
+fpgen = GetMorganGenerator(radius=2, fpSize=2048)
+
+def get_fp(smile):
+    mol = Chem.MolFromSmiles(smile)
+    if mol is None:
+        return np.zeros(2048, dtype=int)
+    
+    fp = fpgen.GetFingerprint(mol)
+    arr = np.zeros((2048,), dtype=int)
+    DataStructs.ConvertToNumpyArray(fp, arr)
+    return arr
+
+print("Generating fingerprints...")
+X = np.vstack([get_fp(s) for s in df['smiles']])
+print(f"Fingerprint matrix: {X.shape}")
+
+# %%
+# 5. Standardization + PCA
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
 pca = PCA(n_components=50, random_state=42)
-X_pca = pca.fit_transform(X)
+X_pca = pca.fit_transform(X_scaled)
 
-print("Step 2: Running t-SNE for local structure visualization...")
-# 基于 PCA 的结果跑 t-SNE
-tsne = TSNE(n_components=2, random_state=42, init='pca', learning_rate='auto')
+print(f"Explained variance (50 PCs): {pca.explained_variance_ratio_.sum():.3f}")
+
+# %%
+# 6. PCA Variance Curve
+plt.figure(figsize=(6,4))
+plt.plot(np.cumsum(pca.explained_variance_ratio_)*100, lw=2)
+plt.xlabel('Number of Components')
+plt.ylabel('Cumulative Explained Variance (%)')
+plt.title('PCA Explained Variance')
+
+plt.tight_layout()
+plt.savefig(output_dir / "Figure_S1_PCA_variance.svg", bbox_inches='tight')
+plt.show()
+
+# %%
+# 7. PCA Scatter
+df['PC1'] = X_pca[:, 0]
+df['PC2'] = X_pca[:, 1]
+
+palette = {1: '#28559A', 0: '#B73131'}
+
+fig, ax = plt.subplots(figsize=(6,5))
+
+for val in [0,1]:
+    subset = df[df['label']==val]
+    ax.scatter(subset['PC1'], subset['PC2'],
+               color=palette[val],
+               s=20, alpha=0.6,
+               label='Active' if val==1 else 'Inactive')
+
+ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+ax.set_title('PCA Projection', fontweight='bold')
+
+ax.legend(frameon=True)
+
+# 期刊风
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(direction='out', length=5, width=1)
+
+plt.tight_layout()
+plt.savefig(output_dir / "Figure_S1_PCA_scatter.svg", bbox_inches='tight')
+plt.show()
+
+# %%
+# 8. t-SNE（仅可视化）
+tsne = TSNE(
+    n_components=2,
+    perplexity=30,
+    random_state=42,
+    init='pca',
+    learning_rate='auto'
+)
+
 X_tsne = tsne.fit_transform(X_pca)
 
 df['tsne_1'] = X_tsne[:, 0]
 df['tsne_2'] = X_tsne[:, 1]
-print("Dimension reduction completed.")
 
 # %%
-# 诊断 PCA 的数据
-print(f"Max TSNE 1 value: {df['tsne_1'].max()}")
-print(f"Min TSNE 1 value: {df['tsne_1'].min()}")
-
-# %% 
-# 4. Clustering Evaluation 
-print("Evaluating optimal cluster number (k)...")
+# 9. Clustering Evaluation（在 PCA 空间）
 k_range = range(2, 11)
 inertia = []
 silhouette_avg = []
 
 for k in k_range:
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(X_tsne)
+    labels = kmeans.fit_predict(X_pca)
+    
     inertia.append(kmeans.inertia_)
-    silhouette_avg.append(silhouette_score(X_tsne, labels))
+    silhouette_avg.append(silhouette_score(X_pca, labels))
 
-# --- 绘图部分：双轴评估图 ---
-fig, ax1 = plt.subplots(figsize=(8, 5), dpi=150)
+# Plot
+fig, ax1 = plt.subplots(figsize=(7,5))
 
-ax1.plot(k_range, inertia, marker='o', color='#1f77b4', lw=2, label='Inertia (Elbow)')
-ax1.set_xlabel('Number of Clusters (k)', fontweight='bold')
-ax1.set_ylabel('Inertia', color='#1f77b4', fontweight='bold')
-ax1.tick_params(axis='y', labelcolor='#1f77b4', direction='in')
-ax1.tick_params(axis='x', direction='in')
+ax1.plot(k_range, inertia, 'o-', lw=2)
+ax1.set_xlabel('k')
+ax1.set_ylabel('Inertia')
 
 ax2 = ax1.twinx()
-ax2.plot(k_range, silhouette_avg, marker='s', color='#d62728', lw=2, ls='--', label='Silhouette')
-ax2.set_ylabel('Silhouette Score', color='#d62728', fontweight='bold')
-ax2.tick_params(axis='y', labelcolor='#d62728', direction='in')
+ax2.plot(k_range, silhouette_avg, 's--', lw=2)
+ax2.set_ylabel('Silhouette Score')
 
-# 强化 L 型边框
-ax1.spines['top'].set_visible(False)
-ax2.spines['top'].set_visible(False)
+ax1.set_title('Cluster Optimization')
 
-plt.title('Optimization of Cluster Number (k)', fontweight='bold', pad=15)
 plt.tight_layout()
+plt.savefig(output_dir / "Figure_S2_cluster_optimization.svg", bbox_inches='tight')
 plt.show()
-#plt.savefig("../Data/NSD2/Cluster_Optimization_k.png", dpi=300, bbox_inches='tight')
 
 # %%
-# 5. Final K-Means Clustering
-manual_k = 6 
+# 10. Final Clustering
+manual_k = 8 # adjust based on elbow/silhouette
+
 kmeans_final = KMeans(n_clusters=manual_k, random_state=42, n_init=10)
-df['cluster'] = kmeans_final.fit_predict(X_tsne)
+df['cluster'] = kmeans_final.fit_predict(X_pca)
+df['cluster_id'] = df['cluster'] + 1
 
+# %%
+# 11. Final Visualization（t-SNE）
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14,6))
 
-# %% 
-# 6. Final Visualization: Dual-Plot (Clusters with Centroids vs. Bioactivity)
-import matplotlib.lines as mlines
+cluster_palette = sns.color_palette("husl", manual_k)
+activity_palette = {1: '#28559A', 0: '#B73131'}
 
-# --- 1. 数据预处理与强转 ---
-df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(0).astype(int)
-df['cluster'] = pd.to_numeric(df['cluster'], errors='coerce').fillna(0).astype(int)
-
-# 获取质心坐标 (基于 KMeans 结果)
-centroids = kmeans_final.cluster_centers_
-
-output_base = f"../Data/NSD2/NSD2_Dual_Analysis_k{manual_k}"
-
-# --- 2. 创建双子图 (学术比例 18:8) ---
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8), dpi=300)
-
-# 颜色配置
-cluster_palette = sns.color_palette("husl", manual_k) 
-activity_palette = {1: '#28559A', 0: '#B73131'} # 深蓝与深红
-
-# --- A. 左子图：Scaffold Clusters + Centroids ---
+# --- A. Clusters ---
 for i in range(manual_k):
     subset = df[df['cluster'] == i]
-    if not subset.empty:
-        ax1.scatter(
-            subset['tsne_1'], subset['tsne_2'], 
-            color=cluster_palette[i],
-            s=40, alpha=0.5, edgecolors='white', linewidths=0.2,
-            label=f'Cluster {i}'
-        )
+    ax1.scatter(
+        subset['tsne_1'], subset['tsne_2'],
+        color=cluster_palette[i],
+        s=25, alpha=0.6,
+        label=f'Cluster {i+1}'
+    )
 
-# 绘制质心 - 采用双层叠加法增强视觉对比
-'''
-ax1.scatter(
-    centroids[:, 0], centroids[:, 1], 
-    s=250, c='none', edgecolors='black', marker='o', linewidths=2, alpha=0.8, zorder=10
-)
-'''
-ax1.scatter(
-    centroids[:, 0], centroids[:, 1], 
-    s=120, c='black', marker='x', linewidths=2.5, label='Centroids', zorder=11
-)
-ax1.set_title('(A) Chemical Scaffold Clusters', fontsize=18, fontweight='bold', loc='left', pad=15)
-ax1.set_xlabel('t-SNE Dimension 1', fontsize=14, fontweight='bold')
-ax1.set_ylabel('t-SNE Dimension 2', fontsize=14, fontweight='bold')
-ax1.legend(bbox_to_anchor=(1.02, 1), loc='upper left', frameon=False, title="Groups")
+ax1.set_title('(A) Chemical Space Clusters', fontweight='bold')
+ax1.set_xlabel('t-SNE 1')
+ax1.set_ylabel('t-SNE 2')
+ax1.legend(frameon=True, fontsize=9)
 
-# --- B. 右子图：Bioactivity Distribution ---
-for val in [0, 1]:
-    subset = df[df['label'] == val]
-    if not subset.empty:
-        ax2.scatter(
-            subset['tsne_1'], subset['tsne_2'], 
-            color=activity_palette[val],
-            s=45, alpha=0.6, edgecolors='white', linewidths=0.3,
-            zorder=3 if val == 1 else 2, # 活性点置顶
-            label='Active (1)' if val == 1 else 'Inactive (0)'
-        )
+# --- B. Activity ---
+for val in [0,1]:
+    subset = df[df['label']==val]
+    ax2.scatter(
+        subset['tsne_1'], subset['tsne_2'],
+        color=activity_palette[val],
+        s=25, alpha=0.6,
+        label='Active' if val==1 else 'Inactive'
+    )
 
-ax2.set_title('(B) Bioactivity Distribution', fontsize=18, fontweight='bold', loc='left', pad=15)
-ax2.set_xlabel('t-SNE Dimension 1', fontsize=14, fontweight='bold')
-ax2.legend(bbox_to_anchor=(1.02, 1), loc='upper left', frameon=False, title="Activity")
+ax2.set_title('(B) Bioactivity Distribution', fontweight='bold')
+ax2.set_xlabel('t-SNE 1')
+ax2.legend(frameon=True)
 
-# --- 3. 统一学术格式化：强化 L 型轴线 ---
+# --- Style ---
 for ax in [ax1, ax2]:
-    # 移除冗余边框
-    ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
-    # 强化 L 型边框线宽
-    ax.spines['left'].set_visible(True)
-    ax.spines['bottom'].set_visible(True)
-    ax.spines['left'].set_linewidth(1.5)
-    ax.spines['bottom'].set_linewidth(1.5)
-    # 刻度线向内
-    ax.tick_params(direction='in', length=6, width=1.5, labelsize=12)
-    ax.grid(False)
+    ax.spines['right'].set_visible(False)
+    
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+    
+    ax.tick_params(direction='out', length=5, width=1)
 
 plt.tight_layout()
-
-# --- 4. 多格式导出 ---
-# 导出 PNG 用于常规预览 (600 DPI)
-plt.savefig(f"{output_base}.png", dpi=600, bbox_inches='tight')
-# 导出 SVG 用于论文排版 (矢量无损)
-plt.savefig(f"{output_base}.svg", format='svg', bbox_inches='tight')
-
+plt.savefig(output_dir / "Figure_2_TSNE_cluster_activity.svg", bbox_inches='tight')
 plt.show()
 
-print(f"Success! \nPNG: {output_base}.png \nSVG: {output_base}.svg")
+# %%
+# 12. Cluster Enrichment
+print("\nCluster Activity Enrichment:")
+enrichment = df.groupby('cluster_id')['label'].mean().sort_values(ascending=False)
+print(enrichment)
+
+# %%
+# 13. Scaffold Analysis
+from rdkit.Chem.Scaffolds import MurckoScaffold
+
+def get_scaffold(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        return MurckoScaffold.MurckoScaffoldSmiles(mol=mol)
+    return None
+
+df['scaffold'] = df['smiles'].apply(get_scaffold)
+
+# %%
+# 14. Scaffold Summary（加入活性比例）
+scaffold_summary = (
+    df.groupby(['cluster_id', 'scaffold'])
+      .agg(
+          count=('label', 'size'),
+          active_ratio=('label', 'mean')
+      )
+      .reset_index()
+)
+# %%
+# 15. Top scaffolds per cluster（Top 3）
+top_scaffold = (
+    scaffold_summary
+    .sort_values(['cluster_id', 'count'], ascending=[True, False])
+    .groupby('cluster_id')
+    .head(3)
+)
+
+print("\nTop scaffolds per cluster:")
+print(top_scaffold)
+
+
+# %%
+# 16. Representative Molecule Selection（核心步骤）
+from scipy.spatial.distance import cdist
+
+representatives = []
+
+for cid in sorted(df['cluster_id'].unique()):
+    subset = df[df['cluster_id'] == cid]
+    
+    # 优先选 active
+    subset_active = subset[subset['label'] == 1]
+    if len(subset_active) > 0:
+        subset = subset_active
+    
+    coords = subset[['tsne_1', 'tsne_2']].values
+    center = coords.mean(axis=0)
+    
+    dists = cdist(coords, [center]).flatten()
+    idx = np.argmin(dists)
+    
+    representatives.append(subset.iloc[idx])
+
+rep_df = pd.DataFrame(representatives)
+
+# %%
+# 17. Draw Representative Molecules
+from rdkit.Chem import Draw
+
+mols = [Chem.MolFromSmiles(s) for s in rep_df['smiles']]
+
+legends = [
+    f"C{row['cluster_id']} | {'Active' if row['label']==1 else 'Inactive'}"
+    for _, row in rep_df.iterrows()
+]
+
+img = Draw.MolsToGridImage(
+    mols,
+    molsPerRow=4,
+    subImgSize=(300, 300),
+    legends=legends,
+    useSVG=True
+)
+
+with open(output_dir / "Figure_3_representative_molecules.svg", "w") as f:
+    f.write(img.data)
+
+# %%
+# 18. t-SNE Plot with Cluster + Enrichment Annotation
+fig, ax = plt.subplots(figsize=(7,6))
+
+cluster_palette = sns.color_palette("husl", len(df['cluster_id'].unique()))
+
+for i, cid in enumerate(sorted(df['cluster_id'].unique())):
+    subset = df[df['cluster_id'] == cid]
+    
+    ax.scatter(
+        subset['tsne_1'], subset['tsne_2'],
+        color=cluster_palette[i],
+        s=25, alpha=0.6,
+        label=f'C{cid}'
+    )
+
+# 添加 enrichment annotation（关键）
+for cid in df['cluster_id'].unique():
+    subset = df[df['cluster_id'] == cid]
+    
+    x = subset['tsne_1'].mean()
+    y = subset['tsne_2'].mean()
+    
+    ratio = enrichment.loc[cid]
+    
+    ax.text(
+        x, y,
+        f"C{cid}\n({ratio:.2f})",
+        fontsize=9,
+        ha='center',
+        va='center',
+        bbox=dict(boxstyle='round,pad=0.25', fc='white', alpha=0.7)
+    )
+
+ax.set_title('t-SNE Chemical Space with Cluster Enrichment', fontweight='bold')
+ax.set_xlabel('t-SNE 1')
+ax.set_ylabel('t-SNE 2')
+
+ax.legend(frameon=True, fontsize=8)
+
+# 学术风格
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(direction='out', length=5, width=1)
+
+plt.tight_layout()
+plt.savefig(output_dir / "Figure_2_TSNE_enrichment.svg", bbox_inches='tight')
+plt.show()
+
+# %%
+# 19. Cluster Enrichment Bar Plot
+enrichment_df = enrichment.reset_index()
+
+plt.figure(figsize=(6,4))
+sns.barplot(x='cluster_id', y='label', data=enrichment_df)
+
+plt.ylabel('Active Ratio')
+plt.xlabel('Cluster ID')
+plt.title('Cluster Activity Enrichment')
+
+# 学术风格
+ax = plt.gca()
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(direction='out', length=5, width=1)
+
+plt.tight_layout()
+plt.savefig(output_dir / "Figure_S3_enrichment_bar.svg", bbox_inches='tight')
+plt.show()
+
+# %%
+# 20. Save Key Tables
+top_scaffold.to_csv(output_dir / "top_scaffolds.csv", index=False)
+rep_df.to_csv(output_dir / "representative_molecules.csv", index=False)
+
+print("\nAll outputs saved to:", output_dir)
 # %%

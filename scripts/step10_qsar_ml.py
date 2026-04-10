@@ -89,7 +89,7 @@ DEFAULT_SEEDS = [42, 43, 44]
 
 NON_TREE_MODELS = {"LR", "SVC", "MLP"}
 TREE_MODELS = {"RFC", "ETC", "XGBC"}
-EVAL_METRICS = ["accuracy", "precision", "recall", "f1", "mcc", "roc_auc", "pr_auc", "ef1", "ef5"]
+EVAL_METRICS = ["accuracy", "precision", "recall", "f1", "mcc", "roc_auc", "pr_auc", "ef1", "ef5", "ef10", "nef10"]
 
 
 def serialize_json(value: Any) -> Any:
@@ -97,6 +97,10 @@ def serialize_json(value: Any) -> Any:
         return {k: serialize_json(v) for k, v in value.items()}
     if isinstance(value, list):
         return [serialize_json(v) for v in value]
+    if isinstance(value, tuple):
+        return [serialize_json(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, np.ndarray):
         return serialize_json(value.tolist())
     if isinstance(value, (np.integer, int)):
@@ -1052,6 +1056,24 @@ def enrichment_factor(y_true: np.ndarray, y_score: np.ndarray, top_fraction: flo
     return float(top_hit_rate / base_hit_rate)
 
 
+def normalized_enrichment_factor(y_true: np.ndarray, y_score: np.ndarray, top_fraction: float) -> float:
+    y_true_arr = np.asarray(y_true).astype(int)
+    n_samples = len(y_true_arr)
+    if n_samples == 0:
+        return float("nan")
+    total_hits = int(np.sum(y_true_arr == 1))
+    if total_hits == 0:
+        return float("nan")
+    top_k = max(1, int(np.ceil(float(top_fraction) * n_samples)))
+    ef_val = enrichment_factor(y_true_arr, y_score, top_fraction)
+    max_hits = min(total_hits, top_k)
+    base_hit_rate = total_hits / float(n_samples)
+    ef_max = (max_hits / float(top_k)) / base_hit_rate if base_hit_rate > 0 else float("nan")
+    if not np.isfinite(ef_val) or not np.isfinite(ef_max) or ef_max <= 0:
+        return float("nan")
+    return float(ef_val / ef_max)
+
+
 def evaluate_classifier(model, X: np.ndarray, y: np.ndarray, threshold: float = 0.5) -> Dict[str, float]:
     y_pred, proba = get_prediction_outputs(model, X, threshold)
     metrics = {
@@ -1072,11 +1094,15 @@ def evaluate_classifier(model, X: np.ndarray, y: np.ndarray, threshold: float = 
             metrics["pr_auc"] = float("nan")
         metrics["ef1"] = float(enrichment_factor(y, proba, 0.01))
         metrics["ef5"] = float(enrichment_factor(y, proba, 0.05))
+        metrics["ef10"] = float(enrichment_factor(y, proba, 0.10))
+        metrics["nef10"] = float(normalized_enrichment_factor(y, proba, 0.10))
     else:
         metrics["roc_auc"] = float("nan")
         metrics["pr_auc"] = float("nan")
         metrics["ef1"] = float("nan")
         metrics["ef5"] = float("nan")
+        metrics["ef10"] = float("nan")
+        metrics["nef10"] = float("nan")
     return metrics
 
 
@@ -1603,14 +1629,28 @@ def save_model_artifacts(model,
 
 
 def save_split_data(split_seed_dir: Path, fp_dev: np.ndarray, desc_dev: np.ndarray, 
-                    fp_ext: np.ndarray, desc_ext: np.ndarray) -> None:
-    """Save train and test feature arrays."""
+                    fp_ext: np.ndarray, desc_ext: np.ndarray,
+                    y_dev: np.ndarray, y_ext: np.ndarray,
+                    ids_dev: List[Any], ids_ext: List[Any],
+                    smiles_dev: List[str], smiles_ext: List[str]) -> None:
+    """Save development and external split arrays with metadata for downstream analysis."""
     data_dir = split_seed_dir / "data" / "splits"
     ensure_dir(data_dir)
     np.savez_compressed(
+        data_dir / "dev_train.npz",
+        fp=fp_dev.astype(np.float32),
+        desc=desc_dev.astype(np.float32),
+        y=y_dev.astype(np.int32),
+        id=np.asarray(ids_dev, dtype=object),
+        smiles=np.asarray(smiles_dev, dtype=object),
+    )
+    np.savez_compressed(
         data_dir / "external_test.npz",
-        fp=fp_ext,
-        desc=desc_ext,
+        fp=fp_ext.astype(np.float32),
+        desc=desc_ext.astype(np.float32),
+        y=y_ext.astype(np.int32),
+        id=np.asarray(ids_ext, dtype=object),
+        smiles=np.asarray(smiles_ext, dtype=object),
     )
 
 
@@ -1624,6 +1664,154 @@ def save_feature_processors(split_seed_dir: Path, mask: np.ndarray, descriptor_n
         json.dump(descriptor_names, f, indent=2)
     with open(fp_dir / "feature_config.json", "w") as f:
         json.dump(feature_config, f, indent=2)
+
+
+def select_background_indices(y: np.ndarray, max_samples: int, random_state: int) -> np.ndarray:
+    """Select a class-balanced subset when possible for SHAP background data."""
+    total = int(len(y))
+    if total == 0:
+        return np.array([], dtype=int)
+    n_take = min(max(1, int(max_samples)), total)
+    if n_take >= total:
+        return np.arange(total, dtype=int)
+
+    y_arr = np.asarray(y).astype(int)
+    rng = np.random.default_rng(int(random_state))
+    classes = np.unique(y_arr)
+    if len(classes) < 2:
+        return np.sort(rng.choice(total, size=n_take, replace=False).astype(int))
+
+    per_class_target = max(1, n_take // len(classes))
+    picked: List[int] = []
+    for cls in classes:
+        cls_idx = np.where(y_arr == cls)[0]
+        if len(cls_idx) == 0:
+            continue
+        take = min(per_class_target, len(cls_idx))
+        sampled = rng.choice(cls_idx, size=take, replace=False)
+        picked.extend(int(x) for x in sampled)
+
+    if len(picked) < n_take:
+        used = set(picked)
+        remain = np.array([i for i in range(total) if i not in used], dtype=int)
+        if len(remain) > 0:
+            extra_take = min(n_take - len(picked), len(remain))
+            extra = rng.choice(remain, size=extra_take, replace=False)
+            picked.extend(int(x) for x in extra)
+
+    if len(picked) > n_take:
+        picked = list(rng.choice(np.array(picked, dtype=int), size=n_take, replace=False))
+
+    return np.sort(np.array(picked, dtype=int))
+
+
+def save_shap_ready_artifacts(split_seed_dir: Path,
+                              selected_models: List[str],
+                              mask: np.ndarray,
+                              descriptor_names: List[str],
+                              scaler: Optional[StandardScaler],
+                              fp_dev: np.ndarray,
+                              desc_dev: np.ndarray,
+                              y_dev: np.ndarray,
+                              ids_dev: List[Any],
+                              smiles_dev: List[str],
+                              fp_ext: np.ndarray,
+                              desc_ext: np.ndarray,
+                              y_ext: np.ndarray,
+                              ids_ext: List[Any],
+                              smiles_ext: List[str],
+                              split_seed: int,
+                              background_max_samples: int = 256) -> Dict[str, Any]:
+    """Export SHAP-ready matrices and metadata per model."""
+    shap_dir = split_seed_dir / "data" / "shap"
+    ensure_dir(shap_dir)
+    feature_dir = split_seed_dir / "feature_processors"
+    ensure_dir(feature_dir)
+
+    fp_dev_filtered = apply_mask(fp_dev, mask).astype(np.float32)
+    fp_ext_filtered = apply_mask(fp_ext, mask).astype(np.float32)
+    desc_dev_raw = desc_dev.astype(np.float32)
+    desc_ext_raw = desc_ext.astype(np.float32)
+    if scaler is not None:
+        desc_dev_scaled = scaler.transform(desc_dev_raw).astype(np.float32)
+        desc_ext_scaled = scaler.transform(desc_ext_raw).astype(np.float32)
+    else:
+        desc_dev_scaled = desc_dev_raw
+        desc_ext_scaled = desc_ext_raw
+
+    x_dev_tree = np.concatenate([fp_dev_filtered, desc_dev_raw], axis=1).astype(np.float32)
+    x_ext_tree = np.concatenate([fp_ext_filtered, desc_ext_raw], axis=1).astype(np.float32)
+    x_dev_scaled = np.concatenate([fp_dev_filtered, desc_dev_scaled], axis=1).astype(np.float32)
+    x_ext_scaled = np.concatenate([fp_ext_filtered, desc_ext_scaled], axis=1).astype(np.float32)
+
+    feature_names, feature_types = build_feature_names(mask, descriptor_names)
+    feature_schema = {
+        "feature_names": feature_names,
+        "feature_types": feature_types,
+        "n_features": int(len(feature_names)),
+    }
+    with open(feature_dir / "feature_names_final.json", "w") as f:
+        json.dump(feature_schema, f, indent=2)
+
+    ids_dev_arr = np.asarray(ids_dev, dtype=object)
+    smiles_dev_arr = np.asarray(smiles_dev, dtype=object)
+    ids_ext_arr = np.asarray(ids_ext, dtype=object)
+    smiles_ext_arr = np.asarray(smiles_ext, dtype=object)
+    y_dev_i32 = np.asarray(y_dev).astype(np.int32)
+    y_ext_i32 = np.asarray(y_ext).astype(np.int32)
+
+    bg_idx = select_background_indices(y_dev_i32, background_max_samples, random_state=split_seed)
+    manifest_rows: List[Dict[str, Any]] = []
+    for model_key in selected_models:
+        use_scaled = bool(model_key in NON_TREE_MODELS and scaler is not None)
+        input_mode = "scaled" if use_scaled else "tree_raw"
+        x_dev_model = x_dev_scaled if use_scaled else x_dev_tree
+        x_ext_model = x_ext_scaled if use_scaled else x_ext_tree
+
+        bg_path = shap_dir / f"background_{model_key}.npz"
+        np.savez_compressed(
+            bg_path,
+            X=x_dev_model[bg_idx],
+            y=y_dev_i32[bg_idx],
+            id=ids_dev_arr[bg_idx],
+            smiles=smiles_dev_arr[bg_idx],
+            feature_names=np.asarray(feature_names, dtype=object),
+            feature_types=np.asarray(feature_types, dtype=object),
+            model=np.array([model_key], dtype=object),
+            input_mode=np.array([input_mode], dtype=object),
+        )
+
+        explain_path = shap_dir / f"explain_external_{model_key}.npz"
+        np.savez_compressed(
+            explain_path,
+            X=x_ext_model,
+            y=y_ext_i32,
+            id=ids_ext_arr,
+            smiles=smiles_ext_arr,
+            feature_names=np.asarray(feature_names, dtype=object),
+            feature_types=np.asarray(feature_types, dtype=object),
+            model=np.array([model_key], dtype=object),
+            input_mode=np.array([input_mode], dtype=object),
+        )
+
+        manifest_rows.append({
+            "model": model_key,
+            "input_mode": input_mode,
+            "background_path": str(bg_path),
+            "explain_external_path": str(explain_path),
+            "background_n": int(len(bg_idx)),
+            "explain_external_n": int(len(y_ext_i32)),
+            "n_features": int(x_ext_model.shape[1]),
+        })
+
+    manifest = {
+        "split_seed": int(split_seed),
+        "background_max_samples": int(background_max_samples),
+        "rows": manifest_rows,
+    }
+    with open(shap_dir / "shap_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
 
 
 def fold_results_to_dataframe(fold_results: List[Dict[str, Any]]) -> pd.DataFrame:
@@ -1696,37 +1884,38 @@ def write_publication_methods_summary(run_dir: Path,
     if len(config.descriptor_names) > 6:
         descriptor_preview += ", ..."
     text = (
-        "1) 数据与特征配置\n"
-        f"本次训练数据来自 {Path(config.input_path).resolve()}，共 {n_samples} 个分子，"
-        f"其中 active={n_active}，inactive={n_inactive}。"
-        f"数据切分采用 {config.split_method}，external test 比例为 {config.test_size}，"
-        f"split seeds={config.split_seeds}，CV folds={config.folds}。"
-        f"Morgan fingerprint 为 2048 bits（来源：{'复用输入列' if precomputed_fp else 'RDKit重新计算'}），"
-        f"RDKit descriptors 共 {len(config.descriptor_names)} 个（来源：{'复用输入列' if precomputed_desc else 'RDKit重新计算'}），"
-        f"名称示例：{descriptor_preview}。\n\n"
-        "2) 模型与训练策略\n"
-        f"本次使用模型：{', '.join(config.selected_models)}。"
-        f"Fingerprint 先做方差与相关性过滤（variance_threshold={config.variance_threshold}, "
-        f"correlation_threshold={config.correlation_threshold}），再与 descriptor 按 fp_first 顺序拼接。"
-        "非树模型（LR/SVC/MLP）仅对 descriptor 做标准化，树模型使用原始 descriptor。"
-        f"超参数搜索配置：enabled={bool(tuning_cfg.get('enabled', False))}, "
+        "1) Data and Feature Configuration\n"
+        f"- Input file: {Path(config.input_path).resolve()}\n"
+        f"- Sample counts: total={n_samples}, active={n_active}, inactive={n_inactive}\n"
+        f"- Split strategy: method={config.split_method}, external_test_size={config.test_size}, "
+        f"split_seeds={config.split_seeds}, cv_folds={config.folds}\n"
+        f"- Morgan fingerprints: 2048 bits, source={'reused input columns' if precomputed_fp else 'recomputed by RDKit'}\n"
+        f"- RDKit descriptors: n={len(config.descriptor_names)}, source={'reused input columns' if precomputed_desc else 'recomputed by RDKit'}\n"
+        f"- Descriptor preview: {descriptor_preview}\n\n"
+        "2) Models and Training Strategy\n"
+        f"- Models: {', '.join(config.selected_models)}\n"
+        f"- FP filtering: variance_threshold={config.variance_threshold}, correlation_threshold={config.correlation_threshold}\n"
+        "- Feature concatenation: fp_first (filtered fingerprint block + descriptor block)\n"
+        "- Scaling policy: descriptor-only scaling for LR/SVC/MLP; raw descriptors for tree models\n"
+        f"- Hyperparameter tuning: enabled={bool(tuning_cfg.get('enabled', False))}, "
         f"search_type={tuning_cfg.get('search_type', 'random')}, "
-        f"cv_folds={tuning_cfg.get('cv_folds', 3)}, scoring={tuning_cfg.get('scoring', 'roc_auc')}。"
-        f"阈值策略配置：enabled={bool(threshold_cfg.get('enabled', False))}, "
-        f"selection_rule={threshold_cfg.get('selection_rule', 'max_f1')}，"
-        "在 OOF 上同时计算 Youden-J 与 Max-F1 候选阈值并锁定后用于 external test；"
-        "不在测试集上反向调阈值。"
-        f"数据增强配置：enabled={bool(aug_cfg.get('use_smiles_augmentation', False))}, "
-        f"n_augments={aug_cfg.get('n_augments', 0)}, descriptor_mode={aug_cfg.get('descriptor_mode', 'reuse_original')}。\n\n"
-        "3) 输出与复现信息\n"
-        f"本次运行目录：{run_dir.resolve()}。主要输出包括："
-        "每个 split_seed 的 CV 结果（fold_results.csv, cv_summary.csv）、"
-        "external 结果（external_test_results.csv, external_test_predictions.csv）、"
-        "阈值分析数据（threshold_selection_summary.csv, threshold_curves_data.csv）、"
-        "模型与处理器（model.joblib, scaler.joblib, fp_mask.npy, feature_config.json）"
-        "以及多 seed 汇总结果（results/all_seed_*）。"
-        f"本次有效配置来源：{config_source}。完整生效参数："
-        f"{json.dumps(serialize_json(asdict(config)), ensure_ascii=False)}。\n"
+        f"cv_folds={tuning_cfg.get('cv_folds', 3)}, scoring={tuning_cfg.get('scoring', 'roc_auc')}\n"
+        f"- Thresholding: enabled={bool(threshold_cfg.get('enabled', False))}, "
+        f"selection_rule={threshold_cfg.get('selection_rule', 'max_f1')}\n"
+        "- Threshold selection protocol: compute Youden-J and Max-F1 on OOF predictions, "
+        "lock one threshold, then apply it directly to external test (no threshold search on test set)\n"
+        f"- Augmentation: enabled={bool(aug_cfg.get('use_smiles_augmentation', False))}, "
+        f"n_augments={aug_cfg.get('n_augments', 0)}, descriptor_mode={aug_cfg.get('descriptor_mode', 'reuse_original')}\n\n"
+        "3) Outputs and Reproducibility\n"
+        f"- Run directory: {run_dir.resolve()}\n"
+        "- Per-seed outputs: CV metrics (fold_results.csv, cv_summary.csv), "
+        "external metrics/predictions (external_test_results.csv, external_test_predictions.csv)\n"
+        "- Threshold outputs: threshold_selection_summary.csv, threshold_curves_data.csv\n"
+        "- Artifacts: model.joblib, scaler.joblib, fp_mask.npy, feature_config.json\n"
+        "- Aggregated outputs: results/all_seed_*\n"
+        f"- Effective config source: {config_source}\n"
+        "- Full effective parameters (JSON):\n"
+        f"{json.dumps(serialize_json(asdict(config)), ensure_ascii=False, indent=2)}\n"
     )
     report_path.write_text(text, encoding="utf-8")
     return report_path
@@ -1845,7 +2034,19 @@ def run_seed(split_seed: int,
     save_feature_processors(split_seed_dir, mask_final, config.descriptor_names, feature_config)
     
     # Save split data
-    save_split_data(split_seed_dir, fp_dev, desc_dev, fp_ext, desc_ext)
+    save_split_data(
+        split_seed_dir,
+        fp_dev,
+        desc_dev,
+        fp_ext,
+        desc_ext,
+        y_dev,
+        y_ext,
+        ids_dev,
+        ids_ext,
+        smiles_dev,
+        smiles_ext,
+    )
     
     # Save trained models
     models_dir = split_seed_dir / "models" / "full_dev"
@@ -1984,6 +2185,29 @@ def run_seed(split_seed: int,
             "train": dev_idx.tolist(),
             "external": ext_idx.tolist(),
         }), f, indent=2)
+
+    shap_manifest = save_shap_ready_artifacts(
+        split_seed_dir=split_seed_dir,
+        selected_models=config.selected_models,
+        mask=mask_final,
+        descriptor_names=config.descriptor_names,
+        scaler=scaler,
+        fp_dev=fp_dev,
+        desc_dev=desc_dev,
+        y_dev=y_dev,
+        ids_dev=ids_dev,
+        smiles_dev=smiles_dev,
+        fp_ext=fp_ext,
+        desc_ext=desc_ext,
+        y_ext=y_ext,
+        ids_ext=ids_ext,
+        smiles_ext=smiles_ext,
+        split_seed=split_seed,
+    )
+    logger.info(
+        f"  ✓ Saved SHAP-ready artifacts: {len(shap_manifest.get('rows', []))} model bundles "
+        f"under {split_seed_dir / 'data' / 'shap'}"
+    )
     
     logger.info(f"  ✓ Saved split indices")
     logger.info(f"\n✓ Completed split_seed {split_seed} | Dev: {len(dev_idx)} | External: {len(ext_idx)}\n")
@@ -2009,6 +2233,7 @@ def run_seed(split_seed: int,
             "train": dev_idx.tolist(),
             "external": ext_idx.tolist(),
         },
+        "shap_manifest": shap_manifest,
     }
 
 
@@ -2298,17 +2523,20 @@ def main() -> None:
         external_summary_df.to_csv(global_results_dir / "all_seed_external_summary.csv", index=False)
         logger.info(f"✓ Saved external test summary")
 
-    publication_summary_path = write_publication_methods_summary(
-        run_dir=run_dir,
-        config=base_config,
-        config_source=config_source,
-        n_samples=int(len(df)),
-        n_active=int(np.sum(y)),
-        n_inactive=int(len(y) - np.sum(y)),
-        precomputed_fp=bool(precomputed_fp),
-        precomputed_desc=bool(descriptors_precomputed),
-    )
-    logger.info(f"✓ Saved publication methods summary: {publication_summary_path}")
+    try:
+        publication_summary_path = write_publication_methods_summary(
+            run_dir=run_dir,
+            config=base_config,
+            config_source=config_source,
+            n_samples=int(len(df)),
+            n_active=int(np.sum(y)),
+            n_inactive=int(len(y) - np.sum(y)),
+            precomputed_fp=bool(precomputed_fp),
+            precomputed_desc=bool(descriptors_precomputed),
+        )
+        logger.info(f"✓ Saved publication methods summary: {publication_summary_path}")
+    except Exception as exc:
+        logger.warning(f"Failed to save publication methods summary: {exc}")
     
     print_process_divider(logger, f"Run Complete - {len(base_config.split_seeds)} Seeds")
     logger.info(f"Models trained: {', '.join(base_config.selected_models)}")

@@ -1,0 +1,66 @@
+# Smoke-test configuration for ./scripts/step10_qsar_ml.py
+# Purpose: fast end-to-end validation with reduced memory usage.
+# Run:
+#   python ./scripts/step10_qsar_ml.py --config config/smoke_test.yaml
+
+# Use the small test dataset to avoid OOM in CI/local smoke runs.
+input_path: ./data/test_data_feature_fingerprint.csv
+output_root: models_out
+task: classification
+smiles_column: smiles
+label_column: label
+id_column: id
+
+seed: 42
+split_seeds: [42]          # one seed is enough for smoke
+folds: 3                   # lower outer CV cost
+selected_models: ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"]  # cover linear/tree/kernel paths
+
+descriptor_names:
+  - MolWt
+  - MolLogP
+  - NumHDonors
+  - NumHAcceptors
+  - NumRotatableBonds
+  - TPSA
+  - HeavyAtomCount
+  - NumValenceElectrons
+  - NumAliphaticRings
+  - NumAromaticRings
+  - FractionCSP3
+  - RingCount
+  - LabuteASA
+  - VSA_EState1
+  - VSA_EState2
+  - SlogP_VSA1
+  - SlogP_VSA2
+  - SMR_VSA1
+  - SMR_VSA2
+  - EState_VSA1
+
+split_method: scaffold
+test_size: 0.2
+variance_threshold: 0.05
+correlation_threshold: 0.9
+
+augmentation:
+  use_smiles_augmentation: false
+  n_augments: 0
+  method: "random_smiles"
+  apply_to: "train_only"
+  descriptor_mode: "reuse_original"
+
+hyperparameter_tuning:
+  enabled: true
+  search_type: "random"   # cheaper than grid for smoke
+  target_models: ["LR", "RFC", "SVC", "XGBC", "ETC", "MLP"]
+  n_iter: 2                # minimal search budget
+  cv_folds: 2              # lower inner CV cost
+  scoring: "roc_auc"
+  n_jobs: 1                # IMPORTANT: avoid OOM from parallel workers
+
+thresholding:
+  enabled: true
+  classification_threshold: 0.5
+  selection_rule: "max_f1"
+  curve_points: 101        # enough for smoke, cheaper than 201
