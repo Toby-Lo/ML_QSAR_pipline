@@ -79,3 +79,10 @@ thresholding:
   classification_threshold: 0.5   # fallback threshold when OOF selection is unavailable
   selection_rule: "max_f1"        # options: "max_f1" | "youden_j"
   curve_points: 201               # optional: threshold grid points for curve export (e.g. 101/201/401)
+
+# Descriptor missing-value handling:
+# - step10 now keeps NaN from RDKit failures, then converts to features that preserve "missingness" via indicators.
+descriptor_missing:
+  strategy: "nan_indicator"   # options: "nan_indicator" | "zero"
+  impute_value: 0.0
+  indicator_suffix: "__isna"

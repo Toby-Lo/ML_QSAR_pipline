@@ -25,8 +25,8 @@ Structure:
   - Lower half: plotting-only cell(s) (Nature style)
 
 python scripts/step24_interpretations_linear.py \
-  --run-dir models_out/qsar_ml_20260409_222051 \
-  --split-seed 42
+  --run-dir models_out/qsar_ml_20260410_124055 \
+  --split-seed 12345
 """
 
 # %%
@@ -82,7 +82,7 @@ USER_CONFIG: Dict[str, Any] = {
 
 
 # %%
-LINEAR_MODELS = {"LR", "SVC"}
+LINEAR_MODELS = {"SVC"}  ### "LR", "SVC"
 
 
 @dataclass
@@ -474,7 +474,7 @@ if _IN_IPYTHON:
     import matplotlib as mpl
 
     PLOT_STYLE: Dict[str, Any] = {
-        "font_family": "Times New Roman", # Cambria
+        "font_family": "Cambria", # Cambria, Times New Roman
         "font_size": 10,
         "dpi": 600,
         "max_display": 20,
@@ -503,7 +503,7 @@ if _IN_IPYTHON:
     })
 
     # --- Inputs ---
-    OUT_DIR = Path("../models_out/qsar_ml_20260409_222051/split_seed_42/shap_analysis")     # Relative Path
+    OUT_DIR = Path("../models_out/qsar_ml_20260410_124055/split_seed_12345/shap_analysis")     # Relative Path
     MODEL_KEY = "SVC"   # "LR" or "SVC"
 
     npz_path = OUT_DIR / MODEL_KEY / "shap_values_external.npz"

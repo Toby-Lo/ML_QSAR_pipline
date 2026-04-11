@@ -6,11 +6,18 @@ both as a CLI tool and in an interactive editor.
 
 Example:
   python scripts/step21_model_robustness.py \
-    --run-dir models_out/qsar_ml_20260409_222051 \
-    --split-seed 42 \
+    --run-dir models_out/qsar_ml_20260410_124055 \
+    --split-seed 12345 \
     --models LR,RFC,SVC,XGBC,ETC,MLP \
     --n-permutations 200 \
-    --input data/test_data_feature_fingerprint.csv
+    --input data/NSD2/nsd2_final_dataset_feature_fingerprint.csv
+
+python scripts/step21_model_robustness.py \
+    --run-dir models_out/qsar_ml_20260410_124055 \
+    --split-seed 12345 \
+    --models SVC \
+    --n-permutations 500 \
+    --input data/NSD2/nsd2_final_dataset_feature_fingerprint.csv
 """
 
 # %%
@@ -711,7 +718,7 @@ if __name__ == "__main__":
 
 # %%
 # Plotting-only cell (interactive)
-#
+####################
 # This block is intentionally self-contained so you can run ONLY this cell in an IDE.
 try:
     from IPython import get_ipython  # type: ignore
@@ -730,7 +737,7 @@ if _IN_IPYTHON:
     import json
 
     PLOT_STYLE: Dict[str, Any] = {
-        "font_family": "Times New Roman",
+        "font_family": "Cambria",
         "font_size": 11,
         "dpi": 600,
         "grid_alpha": 0.2,
@@ -754,8 +761,8 @@ if _IN_IPYTHON:
     )
 
     # --- Inputs (edit these) ---
-    RUN_DIR = Path("../models_out/qsar_ml_20260409_222051") ### relative path because in notebook
-    SPLIT_SEED = 42
+    RUN_DIR = Path("../models_out/qsar_ml_20260410_124055") ### relative path because in notebook
+    SPLIT_SEED = 12345
     MODEL_KEY = "SVC"
     METRIC_LABEL = "ROC-AUC"  # for axis labels only
 

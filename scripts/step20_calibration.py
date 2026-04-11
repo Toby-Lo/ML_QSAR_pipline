@@ -2,8 +2,8 @@
 
 Usage:
   python scripts/step20_calibration.py \
-    --run-dir models_out/qsar_ml_20260409_222051 \
-    --input data/test_data_feature_fingerprint.csv \
+    --run-dir models_out/qsar_ml_20260410_124055 \
+    --input data/NSD2/nsd2_final_dataset_feature_fingerprint.csv \
     --methods both \
     --calibration-source dev
 
@@ -462,10 +462,10 @@ if _IN_IPYTHON:
     )
 
     # --- Inputs (edit these) ---
-    RUN_DIR = Path("../models_out/qsar_ml_20260409_214751") ### Relative path if run in IDE
-    SPLIT_SEED = 42
+    RUN_DIR = Path("../models_out/qsar_ml_20260410_124055") ### Relative path if run in IDE
+    SPLIT_SEED = 12345  ### adjust
     MODEL_KEY = "SVC"   ### adjust
-    METHOD = "sigmoid"  # sigmoid | isotonic
+    METHOD = "isotonic"  # sigmoid | isotonic
 
     CURVE_CSV = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{METHOD}" / "calibration_curve.csv"
     if not CURVE_CSV.exists():

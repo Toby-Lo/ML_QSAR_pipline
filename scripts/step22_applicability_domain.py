@@ -16,7 +16,7 @@ The script is organized with ``# %%`` blocks:
 
 Usage (CLI):
   python scripts/step22_applicability_domain.py \
-    --split-seed 42  --model SVC  --run-dir models_out/qsar_ml_20260409_222051 
+    --split-seed 12345  --model SVC  --run-dir models_out/qsar_ml_20260410_124055
 
 Usage (interactive):
   1) Run the compute/export block (CLI or Jupyter cell)
@@ -85,7 +85,7 @@ class ADConfig:
     cosine_threshold: float = 0.70
     # If True: in_domain = (leverage & som) AND (tanimoto & cosine)
     # If False: in_domain = (leverage & som) OR  (tanimoto & cosine)
-    strict_similarity: bool = False
+    strict_similarity: bool = True
 
     # SOM
     skip_som: bool = True
@@ -799,7 +799,7 @@ if __name__ == "__main__":
 
 # %%
 # Plotting-only cell (interactive)
-#
+##############
 # Goal:
 #   - Quickly visualize AD results WITHOUT recomputing
 #   - Export publication-ready figures (PNG + SVG)
@@ -830,7 +830,7 @@ if _in_ipython():
 
     # Plot style config
     PLOT_STYLE: Dict[str, Any] = {
-        "font_family": "Times New Roman", # Cambria, Times New Roman, Times
+        "font_family": "Cambria", # Cambria, Times New Roman
         "font_size": 11,
         "dpi": 600,
         "grid_alpha": 0.25,
@@ -860,8 +860,8 @@ if _in_ipython():
     PROJECT_ROOT = _guess_project_root()
 
 
-    # 👉 修改这里
-    OUT_DIR = PROJECT_ROOT / "models_out/qsar_ml_20260409_222051/split_seed_42/validation/applicability_domain/SVC/seed_42"
+    # 👉 adjust here 
+    OUT_DIR = PROJECT_ROOT / "./models_out/qsar_ml_20260410_124055/split_seed_12345/validation/applicability_domain/SVC/seed_12345"
 
     # Load data
     ad_csv = OUT_DIR / "ad_external_predictions.csv"

@@ -297,6 +297,13 @@ class MLQSARConfig:
         "selection_rule": "max_f1",
         "curve_points": 201,
     })
+    descriptor_missing: Dict[str, Any] = field(default_factory=lambda: {
+        # "zero": fill missing descriptor values with 0.0 (legacy behavior)
+        # "nan_indicator": keep NaN semantics via extra indicator features, then impute values with 0.0
+        "strategy": "nan_indicator",
+        "impute_value": 0.0,
+        "indicator_suffix": "__isna",
+    })
 
 
 def parse_args() -> argparse.Namespace:
@@ -495,6 +502,26 @@ def normalize_thresholding_config(config: MLQSARConfig) -> None:
     }
 
 
+def normalize_descriptor_missing_config(config: MLQSARConfig) -> None:
+    raw = config.descriptor_missing if isinstance(config.descriptor_missing, dict) else {}
+    strategy = str(raw.get("strategy", "nan_indicator")).strip().lower() or "nan_indicator"
+    if strategy not in {"zero", "nan_indicator"}:
+        raise ValueError("descriptor_missing.strategy must be 'zero' or 'nan_indicator'")
+    impute_value = raw.get("impute_value", 0.0)
+    try:
+        impute_value_f = float(impute_value)
+    except Exception:
+        impute_value_f = 0.0
+    suffix = str(raw.get("indicator_suffix", "__isna"))
+    if not suffix:
+        suffix = "__isna"
+    config.descriptor_missing = {
+        "strategy": strategy,
+        "impute_value": impute_value_f,
+        "indicator_suffix": suffix,
+    }
+
+
 def compute_morgan_fingerprints(smiles_list: List[str],
                                 radius: int = 2,
                                 n_bits: int = 2048,
@@ -533,7 +560,28 @@ def compute_rdkit_descriptors(smiles_list: List[str],
                 value = float("nan")
             rows[name].append(value)
     df = pd.DataFrame(rows)
-    return df.fillna(0.0).astype(np.float32).to_numpy(dtype=np.float32)
+    # Keep NaN for downstream missing-value handling (imputation + optional indicators).
+    return df.astype(np.float32).to_numpy(dtype=np.float32)
+
+
+def apply_descriptor_missing_strategy(desc_matrix: np.ndarray,
+                                      descriptor_names: List[str],
+                                      missing_cfg: Dict[str, Any]) -> Tuple[np.ndarray, List[str]]:
+    strategy = str(missing_cfg.get("strategy", "nan_indicator")).strip().lower()
+    impute_value = float(missing_cfg.get("impute_value", 0.0))
+    suffix = str(missing_cfg.get("indicator_suffix", "__isna")) or "__isna"
+    desc = np.asarray(desc_matrix, dtype=np.float32)
+    # normalize non-finite values to NaN
+    desc[~np.isfinite(desc)] = np.nan
+    if strategy == "zero":
+        filled = np.nan_to_num(desc, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+        return filled, list(descriptor_names)
+    if strategy != "nan_indicator":
+        raise ValueError(f"Unsupported descriptor missing strategy: {strategy}")
+    missing_ind = np.isnan(desc).astype(np.float32)
+    filled = np.nan_to_num(desc, nan=impute_value, posinf=impute_value, neginf=impute_value).astype(np.float32, copy=False)
+    feature_names = list(descriptor_names) + [f"{name}{suffix}" for name in descriptor_names]
+    return np.concatenate([filled, missing_ind], axis=1).astype(np.float32, copy=False), feature_names
 
 
 def randomize_smiles(smiles: str, seed: int) -> Optional[str]:
@@ -558,6 +606,8 @@ def augment_training_data(smiles_train: List[str],
                           fp_train: np.ndarray,
                           desc_train: np.ndarray,
                           descriptor_names: List[str],
+                          descriptor_missing: Dict[str, Any],
+                          descriptor_feature_names: List[str],
                           split_seed: int,
                           phase_seed: int,
                           aug_cfg: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
@@ -617,7 +667,13 @@ def augment_training_data(smiles_train: List[str],
     if descriptor_mode == "reuse_original" and aug_desc_rows:
         desc_aug = np.stack(aug_desc_rows, axis=0).astype(np.float32)
     else:
-        desc_aug = compute_rdkit_descriptors(aug_smiles, descriptor_names, show_progress=False)
+        desc_aug_raw = compute_rdkit_descriptors(aug_smiles, descriptor_names, show_progress=False)
+        desc_aug, aug_feature_names = apply_descriptor_missing_strategy(desc_aug_raw, descriptor_names, descriptor_missing)
+        if aug_feature_names != list(descriptor_feature_names):
+            raise RuntimeError(
+                "Descriptor feature name mismatch after missing-value processing. "
+                "Ensure descriptor_missing config and descriptor_names are consistent."
+            )
     y_aug = np.asarray(aug_labels, dtype=y_train.dtype)
 
     fp_out = np.concatenate([fp_train, fp_aug], axis=0).astype(np.float32)
@@ -1188,6 +1244,7 @@ def run_cross_validation(config: MLQSARConfig,
                          desc_dev: np.ndarray,
                          y_dev: np.ndarray,
                          descriptor_dim: int,
+                         descriptor_feature_names: List[str],
                          split_seed: int,
                          ids_dev: List[Any],
                          smiles_dev: List[str],
@@ -1241,6 +1298,8 @@ def run_cross_validation(config: MLQSARConfig,
             fp_train=fp_train,
             desc_train=desc_train,
             descriptor_names=config.descriptor_names,
+            descriptor_missing=config.descriptor_missing,
+            descriptor_feature_names=descriptor_feature_names,
             split_seed=split_seed,
             phase_seed=fold_idx,
             aug_cfg=config.augmentation,
@@ -1401,6 +1460,7 @@ def train_final_models(config: MLQSARConfig,
                        fp_ext: np.ndarray,
                        desc_ext: np.ndarray,
                        y_ext: np.ndarray,
+                       descriptor_feature_names: List[str],
                        descriptor_dim: int,
                        split_seed: int,
                        ids_ext: List[Any],
@@ -1413,6 +1473,8 @@ def train_final_models(config: MLQSARConfig,
         fp_train=fp_dev,
         desc_train=desc_dev,
         descriptor_names=config.descriptor_names,
+        descriptor_missing=config.descriptor_missing,
+        descriptor_feature_names=descriptor_feature_names,
         split_seed=split_seed,
         phase_seed=9_999,
         aug_cfg=config.augmentation,
@@ -1530,7 +1592,7 @@ def train_final_models(config: MLQSARConfig,
             tree_importances[model_key] = feature_importance_dataframe(
                 model.feature_importances_,
                 mask_final,
-                config.descriptor_names,
+                descriptor_feature_names,
             )
     logger.info(f"\nExternal Test Set Performance:\n")
     ext_metrics_table = {model: metrics["external"][model] for model in config.selected_models}
@@ -1541,6 +1603,7 @@ def train_final_models(config: MLQSARConfig,
 
 def create_feature_config(config: MLQSARConfig,
                           mask: np.ndarray,
+                          descriptor_feature_names: List[str],
                           descriptor_dim: int,
                           needs_scaler: bool,
                           augmentation_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1558,8 +1621,10 @@ def create_feature_config(config: MLQSARConfig,
             "fp_dim_final": fp_dim_final,
         },
         "descriptor": {
-            "names": config.descriptor_names,
+            "raw_names": config.descriptor_names,
+            "feature_names": descriptor_feature_names,
             "dim": descriptor_dim,
+            "missing": serialize_json(config.descriptor_missing),
         },
         "scaling": {
             "use_for_non_tree": needs_scaler,
@@ -1943,6 +2008,7 @@ def run_seed(split_seed: int,
              run_dir: Path,
              fp_matrix: np.ndarray,
              desc_matrix: np.ndarray,
+             descriptor_feature_names: List[str],
              y: np.ndarray,
              smiles: List[str],
              ids: List[Any],
@@ -1985,6 +2051,7 @@ def run_seed(split_seed: int,
         desc_dev,
         y_dev,
         descriptor_dim,
+        descriptor_feature_names,
         split_seed,
         ids_dev,
         smiles_dev,
@@ -2006,6 +2073,7 @@ def run_seed(split_seed: int,
         fp_ext,
         desc_ext,
         y_ext,
+        descriptor_feature_names,
         descriptor_dim,
         split_seed,
         ids_ext,
@@ -2020,6 +2088,7 @@ def run_seed(split_seed: int,
     feature_config = create_feature_config(
         config,
         mask_final,
+        descriptor_feature_names,
         descriptor_dim,
         needs_scaler,
         augmentation_summary={
@@ -2031,7 +2100,7 @@ def run_seed(split_seed: int,
     )
     
     # Save feature processors
-    save_feature_processors(split_seed_dir, mask_final, config.descriptor_names, feature_config)
+    save_feature_processors(split_seed_dir, mask_final, descriptor_feature_names, feature_config)
     
     # Save split data
     save_split_data(
@@ -2190,7 +2259,7 @@ def run_seed(split_seed: int,
         split_seed_dir=split_seed_dir,
         selected_models=config.selected_models,
         mask=mask_final,
-        descriptor_names=config.descriptor_names,
+        descriptor_names=descriptor_feature_names,
         scaler=scaler,
         fp_dev=fp_dev,
         desc_dev=desc_dev,
@@ -2298,6 +2367,7 @@ def main() -> None:
     normalize_augmentation_config(base_config)
     normalize_hyperparameter_tuning_config(base_config)
     normalize_thresholding_config(base_config)
+    normalize_descriptor_missing_config(base_config)
     base_config.input_path = Path(base_config.input_path)
     base_config.output_root = Path(base_config.output_root)
     base_config.output_root.mkdir(parents=True, exist_ok=True)
@@ -2348,10 +2418,16 @@ def main() -> None:
     descriptors_precomputed = set(base_config.descriptor_names).issubset(df.columns)
     if descriptors_precomputed:
         logger.info("✓ Using provided descriptor columns from input")
-        desc_matrix = df[base_config.descriptor_names].astype(np.float32).fillna(0.0).to_numpy(dtype=np.float32)
+        desc_matrix_raw = df[base_config.descriptor_names].astype(np.float32).to_numpy(dtype=np.float32)
     else:
         logger.info("Computing RDKit descriptors...")
-        desc_matrix = compute_rdkit_descriptors(smiles, base_config.descriptor_names)
+        desc_matrix_raw = compute_rdkit_descriptors(smiles, base_config.descriptor_names)
+
+    desc_matrix, descriptor_feature_names = apply_descriptor_missing_strategy(
+        desc_matrix_raw,
+        base_config.descriptor_names,
+        base_config.descriptor_missing,
+    )
 
     all_features_precomputed = precomputed_fp and descriptors_precomputed
     if all_features_precomputed:
@@ -2364,7 +2440,7 @@ def main() -> None:
             input_path=base_config.input_path,
             fp_matrix=fp_matrix,
             desc_matrix=desc_matrix,
-            descriptor_names=base_config.descriptor_names,
+            descriptor_names=descriptor_feature_names,
         )
         out_path_str = str(out_csv.resolve())
         logger.info(f"Recomputed features exported to: {out_path_str}")
@@ -2374,14 +2450,27 @@ def main() -> None:
         logger,
         fp_raw=int(fp_matrix.shape[1]),
         fp_kept=None,
-        descriptors_used=base_config.descriptor_names,
+        descriptors_used=descriptor_feature_names,
         precomputed_found=precomputed_fp,
     )
     
     print_process_divider(logger, "Model Training")
     seed_results: List[Dict[str, Any]] = []
     for split_seed in base_config.split_seeds:
-        seed_results.append(run_seed(split_seed, base_config, run_dir, fp_matrix, desc_matrix, y, smiles, ids, logger))
+        seed_results.append(
+            run_seed(
+                split_seed,
+                base_config,
+                run_dir,
+                fp_matrix,
+                desc_matrix,
+                descriptor_feature_names,
+                y,
+                smiles,
+                ids,
+                logger,
+            )
+        )
 
     print_process_divider(logger, "Aggregating Results Across Seeds")
     # Aggregate results across all seeds

@@ -15,8 +15,8 @@ Structure (Jupyter/IDE friendly):
   - Lower half: plotting-only cells (commented/guarded by IPython)
 
 python scripts/step23_interpretations_tree.py \
-    --run-dir models_out/qsar_ml_20260409_222051 \
-    --split-seed 42 \
+    --run-dir models_out/qsar_ml_20260410_124055 \
+    --split-seed 12345 \
     --models RFC,ETC,XGBC
 """
 
@@ -478,9 +478,6 @@ if _IN_IPYTHON:
     from matplotlib import pyplot as plt
     import matplotlib as mpl
 
-    # =========================
-    # 🎨 Publication-grade style
-    # =========================
     PLOT_STYLE: Dict[str, Any] = {
         "font_family": "Times New Roman",
         "font_size": 10,
