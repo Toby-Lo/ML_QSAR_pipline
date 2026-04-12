@@ -10,6 +10,8 @@ This stage is aligned to the training pipeline in `scripts/step10_qsar_ml.py`:
 - RDKit descriptors: exported using the same `rdkit.Chem.Descriptors.<name>` functions
 
 By default, descriptor names are loaded from `config/nsd2_ml.yaml` (field: `descriptor_names`).
+
+Remember to delete df_desc_isna.columns as final Virtual Screening step to make sure as same as training
 """
 
 import argparse
@@ -199,7 +201,13 @@ def stage3_pipeline(
         df_out = pd.DataFrame({"zinc_id": zinc_ids, "smiles": smiles_out})
         df_fp = pd.DataFrame(fp_matrix, columns=fp_col_names, dtype=np.uint8)
         df_desc = pd.DataFrame(desc_matrix, columns=descriptor_names, dtype=np.float32)
-        df_out = pd.concat([df_out, df_fp, df_desc], axis=1)
+
+        df_desc_isna = df_desc.isna().astype(np.uint8)
+        df_desc_isna.columns = [f"{c}__isna" for c in descriptor_names]
+
+        df_desc = df_desc.fillna(0.0)
+
+        df_out = pd.concat([df_out, df_fp, df_desc, df_desc_isna], axis=1)
 
         df_out["zinc_id"] = df_out["zinc_id"].astype("int64")
         df_out["smiles"] = df_out["smiles"].astype("string")
