@@ -107,8 +107,9 @@ def plot_model_threshold_panel(seed: int,
         return None
 
     configure_plotting(font)
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2))
 
+    # ===== Panel 1: ROC & Youden's J =====
     oof_roc = oof_df[["FPR", "TPR"]].dropna().sort_values("FPR")
     axes[0].plot(oof_roc["FPR"], oof_roc["TPR"], color=color, linewidth=1.8, label="OOF ROC")
     if not ext_df.empty:
@@ -120,61 +121,81 @@ def plot_model_threshold_panel(seed: int,
         j_thr = float(summary_row["youden_j_threshold"])
         j_row = nearest_row(oof_df, j_thr)
         if j_row is not None:
-            axes[0].scatter([float(j_row["FPR"])], [float(j_row["TPR"])], s=34, color="crimson", zorder=5, label=f"Youden-J thr={j_thr:.3f}")
+            axes[0].scatter([float(j_row["FPR"])], [float(j_row["TPR"])], s=40, color="crimson", zorder=5, label=f"Youden-J thr={j_thr:.3f}")
 
-    axes[0].set_title("ROC & Youden's J")
+    axes[0].set_title("ROC & Youden's J", fontsize=11, fontweight="bold")
     axes[0].set_xlabel("False Positive Rate")
     axes[0].set_ylabel("True Positive Rate")
     axes[0].set_xlim(0, 1)
     axes[0].set_ylim(0, 1.02)
     axes[0].legend(loc="lower right", frameon=False, fontsize=8)
 
+    # ===== Panel 2: PR with multiple threshold points =====
     oof_pr = oof_df[["Recall", "Precision"]].dropna().sort_values("Recall")
     axes[1].plot(oof_pr["Recall"], oof_pr["Precision"], color=color, linewidth=1.8, label="OOF PR")
     if not ext_df.empty:
         ext_pr = ext_df[["Recall", "Precision"]].dropna().sort_values("Recall")
         axes[1].plot(ext_pr["Recall"], ext_pr["Precision"], color="black", linestyle="--", linewidth=1.2, alpha=0.7, label="External PR")
 
-    if summary_row is not None and pd.notna(summary_row.get("max_f1_threshold")):
-        f1_thr = float(summary_row["max_f1_threshold"])
-        f1_row = nearest_row(oof_df, f1_thr)
-        if f1_row is not None:
-            axes[1].scatter([float(f1_row["Recall"])], [float(f1_row["Precision"])], s=34, color="crimson", zorder=5, label=f"Max-F1 thr={f1_thr:.3f}")
+    # Plot multiple threshold points on PR curve
+    threshold_configs = [
+        ("max_f1_threshold", "Max-F1", "crimson", "o"),
+        ("max_precision_threshold", "Max-Prec", "blue", "s"),
+        ("max_recall_threshold", "Max-Recall", "green", "^"),
+    ]
+    for thr_col, thr_label, thr_color, marker in threshold_configs:
+        if summary_row is not None and pd.notna(summary_row.get(thr_col)):
+            thr = float(summary_row[thr_col])
+            thr_row = nearest_row(oof_df, thr)
+            if thr_row is not None:
+                axes[1].scatter([float(thr_row["Recall"])], [float(thr_row["Precision"])], 
+                               s=30, color=thr_color, marker=marker, zorder=5, label=f"{thr_label} thr={thr:.3f}")
 
-    axes[1].set_title("PR & Max-F1")
+    axes[1].set_title("PR Curve & Multi-Metric Thresholds", fontsize=11, fontweight="bold")
     axes[1].set_xlabel("Recall")
     axes[1].set_ylabel("Precision")
     axes[1].set_xlim(0, 1)
     axes[1].set_ylim(0, 1.02)
-    axes[1].legend(loc="lower left", frameon=False, fontsize=8)
+    axes[1].legend(loc="lower left", frameon=False, fontsize=7.5)
 
+    # ===== Panel 3: F1 & MCC vs Threshold =====
     oof_thr = oof_df[["Threshold", "F1"]].dropna().sort_values("Threshold")
     axes[2].plot(oof_thr["Threshold"], oof_thr["F1"], color=color, linewidth=1.8, label="OOF F1")
     if not ext_df.empty:
         ext_thr = ext_df[["Threshold", "F1"]].dropna().sort_values("Threshold")
         axes[2].plot(ext_thr["Threshold"], ext_thr["F1"], color="black", linestyle="--", linewidth=1.3, alpha=0.7, label="External F1")
 
-    selected_thr = None
-    if summary_row is not None and pd.notna(summary_row.get("selected_threshold")):
-        selected_thr = float(summary_row["selected_threshold"])
-    elif "selected_threshold" in oof_df.columns and oof_df["selected_threshold"].notna().any():
-        selected_thr = float(oof_df["selected_threshold"].dropna().iloc[0])
-    if selected_thr is not None:
-        axes[2].axvline(selected_thr, color="crimson", linestyle=":", linewidth=1.5, label=f"Locked thr={selected_thr:.3f}")
+    # Also plot MCC if available
+    if "MCC" in oof_df.columns:
+        oof_mcc = oof_df[["Threshold", "MCC"]].dropna().sort_values("Threshold")
+        axes[2].plot(oof_mcc["Threshold"], oof_mcc["MCC"], color=color, linewidth=1.2, 
+                    linestyle="--", alpha=0.6, label="OOF MCC")
 
-    axes[2].set_title("F1 vs Threshold")
+    # Mark selected/optimal thresholds
+    threshold_vlines = [
+        ("max_f1_threshold", "Max-F1", "crimson", "-"),
+        ("max_mcc_threshold", "Max-MCC", "blue", "--"),
+        ("youden_j_threshold", "Youden-J", "green", ":"),
+    ]
+    for thr_col, thr_label, thr_color, linestyle in threshold_vlines:
+        if summary_row is not None and pd.notna(summary_row.get(thr_col)):
+            thr = float(summary_row[thr_col])
+            axes[2].axvline(thr, color=thr_color, linestyle=linestyle, linewidth=1.3, 
+                           alpha=0.7, label=f"{thr_label}={thr:.3f}")
+
+    axes[2].set_title("F1 & MCC vs Threshold", fontsize=11, fontweight="bold")
     axes[2].set_xlabel("Threshold")
-    axes[2].set_ylabel("F1")
+    axes[2].set_ylabel("Score")
     axes[2].set_xlim(0, 1)
-    axes[2].set_ylim(0, 1.02)
-    axes[2].legend(loc="best", frameon=False, fontsize=8)
+    axes[2].set_ylim(-0.05, 1.05)
+    axes[2].legend(loc="best", frameon=False, fontsize=7.5)
 
     for ax in axes:
         ax.grid(False)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.suptitle(f"Threshold Analysis | Seed={seed} | Model={model}", fontsize=12)
+    fig.suptitle(f"Threshold Analysis | Seed={seed} | Model={model}", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -200,10 +221,17 @@ def main() -> None:
         print("[WARN] No threshold_curves_data.csv found under split_seed_*/results.")
         return
 
-    required_cols = {"split_seed", "model", "dataset", "Threshold", "Precision", "Recall", "TPR", "FPR", "F1", "MCC"}
+    # Core required columns (some optional metrics may be missing)
+    required_cols = {"split_seed", "model", "dataset", "Threshold", "TPR", "FPR"}
     missing = required_cols - set(curves_df.columns)
     if missing:
-        raise ValueError(f"threshold_curves_data.csv missing columns: {sorted(missing)}")
+        raise ValueError(f"threshold_curves_data.csv missing core columns: {sorted(missing)}")
+    
+    # Optional metrics (only warn if none are present)
+    optional_metrics = {"Precision", "Recall", "F1", "MCC"}
+    available_metrics = optional_metrics & set(curves_df.columns)
+    if not available_metrics:
+        print("[WARN] threshold_curves_data.csv has no metric columns (Precision, Recall, F1, MCC).")
 
     models = sorted(curves_df["model"].astype(str).unique().tolist())
     palette = sns.color_palette(args.palette, n_colors=max(len(models), 3))

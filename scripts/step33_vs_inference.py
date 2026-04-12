@@ -34,7 +34,7 @@ python scripts/step33_vs_inference.py \
   --threshold_metric youden \
   --input ./data/database/zinc_features.parquet
 
-  # threshold optional: f1(default currently), youden, or specific value
+  # threshold optional: f1(default currently), youden, mcc, recall, precision, or specific value
 """
 
 from __future__ import annotations
@@ -726,21 +726,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     _require_deps()
     import pyarrow.parquet as pq
 
-    # Initialize lightweight logging system
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = f"inference_{ts}.log"
-    
+    # Initialize logging with console output only (will add file handler after output_path is determined)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_path),
-            logging.StreamHandler()
-        ]
+        handlers=[logging.StreamHandler()]
     )
     
     logger = logging.getLogger(__name__)
-    logger.info(f"Starting QSAR virtual screening inference. Log file: {log_path}")
 
     args = parse_args(argv)
     model_dir: Path = args.model_dir
@@ -784,6 +777,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         output_path = run_dir / "virtual_screening" / f"zinc_predictions_{ts}.parquet"
     else:
         output_path = args.output
+
+    # Add file handler to logger after output_path is determined
+    log_dir = output_path.parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"inference_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(file_handler)
+    logger.info(f"Starting QSAR virtual screening inference. Log file: {log_path}")
 
     # Quick schema sanity check (fail fast before streaming)
     pf = pq.ParquetFile(input_path)

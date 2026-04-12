@@ -18,7 +18,11 @@
 #   variance_threshold: fingerprint variance threshold before correlation filtering
 #   correlation_threshold: absolute Pearson threshold for dropping correlated fingerprint bits
 #   hyperparameter_tuning: optional RandomizedSearchCV / GridSearchCV settings
-#   thresholding: decision threshold strategy (OOF-based lock for external evaluation)
+#   thresholding: elastic multi-metric threshold strategy:
+#     - During OOF phase: compute 5 optimal thresholds (F1, MCC, precision, recall, Youden-J)
+#     - Lock ONE threshold (selected by selection_rule) for external test evaluation
+#     - All thresholds available in threshold_selection_summary.csv for downstream analysis
+#     - Inference script (step33) supports dynamic metric selection via --threshold_metric CLI parameter
 
 input_path: ./data/NSD2/nsd2_final_dataset_feature_fingerprint.csv
 output_root: models_out
@@ -77,12 +81,23 @@ hyperparameter_tuning:
 thresholding:
   enabled: true
   classification_threshold: 0.5   # fallback threshold when OOF selection is unavailable
-  selection_rule: "max_f1"        # options: "max_f1" | "youden_j"
-  curve_points: 201               # optional: threshold grid points for curve export (e.g. 101/201/401)
+  selection_rule: "max_mcc"        # which threshold to lock for external test evaluation
+                                  # options: "max_f1" | "max_mcc" | "max_precision" | "max_recall" | "youden_j"
+                                  # Training computes all 5 optimal thresholds from dense sweep (501 points)
+                                  # selection_rule picks ONE to use on external test set
+                                  # All thresholds available in threshold_selection_summary.csv:
+                                  #   - max_f1_threshold (F1-optimized)
+                                  #   - max_mcc_threshold (Matthews Correlation Coefficient)
+                                  #   - max_precision_threshold (precision-optimized)
+                                  #   - max_recall_threshold (recall-optimized)
+                                  #   - youden_j_threshold (Youden's J = TPR - FPR)
+                                  # Inference script (step33) can override via: --threshold_metric {f1|mcc|youden|precision|recall}
+  curve_points: 501               # threshold grid points for dense sweep (501 = 0.0-1.0 step 0.002)
 
 # Descriptor missing-value handling:
-# - step10 now keeps NaN from RDKit failures, then converts to features that preserve "missingness" via indicators.
+# - "zero" strategy: fills NaN with impute_value (default 0.0), no dimension expansion
+# - "nan_indicator" strategy: creates __isna features (doubles dimensions), but step33_vs_inference forbids them
 descriptor_missing:
-  strategy: "nan_indicator"   # options: "nan_indicator" | "zero"
+  strategy: "zero"            # options: "zero" | "nan_indicator" -> use "zero" for inference compatibility
   impute_value: 0.0
-  indicator_suffix: "__isna"
+  indicator_suffix: "__isna"  # only used if strategy=="nan_indicator"

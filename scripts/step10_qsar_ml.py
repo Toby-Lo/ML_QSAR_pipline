@@ -484,7 +484,8 @@ def normalize_thresholding_config(config: MLQSARConfig) -> None:
     if tune_metric not in {"mcc", "f1"}:
         tune_metric = "mcc"
     selection_rule = str(raw.get("selection_rule", "max_f1")).strip().lower() or "max_f1"
-    if selection_rule not in {"max_f1", "youden_j"}:
+    valid_rules = {"max_f1", "max_mcc", "max_precision", "max_recall", "youden_j"}
+    if selection_rule not in valid_rules:
         selection_rule = "max_f1"
     curve_points = int(raw.get("curve_points", 201))
     if curve_points < 21:
@@ -882,6 +883,67 @@ def optimize_threshold(y_true: np.ndarray,
     return best_thr, best_score
 
 
+def compute_dense_threshold_sweep(y_true: np.ndarray,
+                                  y_prob: np.ndarray,
+                                  n_thresholds: int = 501) -> pd.DataFrame:
+    """
+    Compute metrics across a dense threshold grid using vectorized NumPy operations.
+    
+    Args:
+        y_true: True binary labels (0/1)
+        y_prob: Predicted probabilities [0, 1]
+        n_thresholds: Number of threshold points to evaluate (default: 501 = 0.0 to 1.0 step 0.002)
+    
+    Returns:
+        DataFrame with columns: threshold, precision, recall, f1, mcc, tpr, fpr, youden_j
+    """
+    y_true_arr = np.asarray(y_true, dtype=np.int32)
+    y_prob_arr = np.asarray(y_prob, dtype=np.float32)
+    
+    # Generate threshold grid
+    thresholds = np.linspace(0.0, 1.0, n_thresholds, dtype=np.float32)
+    
+    # Vectorized prediction: shape (n_thresholds, n_samples)
+    y_pred_matrix = (y_prob_arr[np.newaxis, :] >= thresholds[:, np.newaxis]).astype(np.int32)
+    
+    # True positives, false positives, true negatives, false negatives (vectorized)
+    tp = np.sum((y_true_arr[np.newaxis, :] == 1) & (y_pred_matrix == 1), axis=1).astype(np.float32)
+    fp = np.sum((y_true_arr[np.newaxis, :] == 0) & (y_pred_matrix == 1), axis=1).astype(np.float32)
+    tn = np.sum((y_true_arr[np.newaxis, :] == 0) & (y_pred_matrix == 0), axis=1).astype(np.float32)
+    fn = np.sum((y_true_arr[np.newaxis, :] == 1) & (y_pred_matrix == 0), axis=1).astype(np.float32)
+    
+    # Precision, Recall (TPR), FPR
+    precision = np.divide(tp, tp + fp, out=np.zeros_like(tp), where=(tp + fp) > 0)
+    recall = np.divide(tp, tp + fn, out=np.zeros_like(tp), where=(tp + fn) > 0)
+    fpr = np.divide(fp, fp + tn, out=np.zeros_like(fp), where=(fp + tn) > 0)
+    
+    # F1 Score
+    f1 = np.divide(2.0 * precision * recall, precision + recall,
+                   out=np.zeros_like(precision), where=(precision + recall) > 0)
+    
+    # Youden J
+    youden_j = recall - fpr
+    
+    # MCC (compute per-threshold using Matthews' formula)
+    # MCC = (TP*TN - FP*FN) / sqrt((TP+FP)*(TP+FN)*(TN+FP)*(TN+FN))
+    numerator = (tp * tn) - (fp * fn)
+    denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    mcc = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+    # Handle edge cases where denominator is 0
+    mcc[denominator == 0] = 0.0
+    
+    return pd.DataFrame({
+        "threshold": thresholds,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "mcc": mcc,
+        "tpr": recall,  # TPR = Recall
+        "fpr": fpr,
+        "youden_j": youden_j,
+    })
+
+
 def compute_confusion_metrics_at_threshold(y_true: np.ndarray,
                                            y_prob: np.ndarray,
                                            threshold: float) -> Dict[str, float]:
@@ -975,22 +1037,49 @@ def determine_oof_thresholds(y_true: np.ndarray,
         max_f1_threshold = youden_threshold
         max_f1_score = float(youden_metrics["f1"])
     max_f1_metrics = compute_confusion_metrics_at_threshold(y_true_arr, y_prob_arr, max_f1_threshold)
+    # Compute all 5 optimal thresholds using dense sweep
+    sweep_df = compute_dense_threshold_sweep(y_true_arr, y_prob_arr, n_thresholds=501)
+    
+    # Extract all 5 optimal thresholds
+    f1_idx = int(np.nanargmax(sweep_df["f1"].values))
+    max_f1_threshold_sweep = float(sweep_df.loc[f1_idx, "threshold"])
+    
+    mcc_idx = int(np.nanargmax(sweep_df["mcc"].values))
+    max_mcc_threshold = float(sweep_df.loc[mcc_idx, "threshold"])
+    
+    precision_idx = int(np.nanargmax(sweep_df["precision"].values))
+    max_precision_threshold = float(sweep_df.loc[precision_idx, "threshold"])
+    
+    recall_idx = int(np.nanargmax(sweep_df["recall"].values))
+    max_recall_threshold = float(sweep_df.loc[recall_idx, "threshold"])
+    
+    youden_idx = int(np.nanargmax(sweep_df["youden_j"].values))
+    max_youden_threshold = float(sweep_df.loc[youden_idx, "threshold"])
+    
+    # Map selection_rule to the corresponding threshold
     selection_rule = str(config.thresholding.get("selection_rule", "max_f1")).lower()
-    selected_threshold = max_f1_threshold if selection_rule == "max_f1" else youden_threshold
+    threshold_map = {
+        "max_f1": max_f1_threshold_sweep,
+        "max_mcc": max_mcc_threshold,
+        "max_precision": max_precision_threshold,
+        "max_recall": max_recall_threshold,
+        "youden_j": max_youden_threshold,
+    }
+    selected_threshold = threshold_map.get(selection_rule, max_f1_threshold_sweep)
     selected_metrics = compute_confusion_metrics_at_threshold(y_true_arr, y_prob_arr, selected_threshold)
 
     return {
         "selection_rule": selection_rule,
         "selected_threshold": float(selected_threshold),
-        "youden_j_threshold": youden_threshold,
-        "youden_j_value": float(j_scores[j_idx]),
-        "youden_j_f1": float(youden_metrics["f1"]),
-        "youden_j_mcc": float(youden_metrics["mcc"]),
-        "max_f1_threshold": max_f1_threshold,
-        "max_f1_value": max_f1_score,
-        "max_f1_mcc": float(max_f1_metrics["mcc"]),
+        "max_f1_threshold": max_f1_threshold_sweep,
+        "max_mcc_threshold": max_mcc_threshold,
+        "max_precision_threshold": max_precision_threshold,
+        "max_recall_threshold": max_recall_threshold,
+        "youden_j_threshold": max_youden_threshold,
         "selected_f1": float(selected_metrics["f1"]),
         "selected_mcc": float(selected_metrics["mcc"]),
+        "selected_precision": float(selected_metrics["precision"]),
+        "selected_recall": float(selected_metrics["recall"]),
     }
 
 
@@ -1405,15 +1494,15 @@ def run_cross_validation(config: MLQSARConfig,
         summary: Dict[str, Any] = {
             "selection_rule": str(config.thresholding.get("selection_rule", "max_f1")).lower(),
             "selected_threshold": float(default_threshold),
-            "youden_j_threshold": None,
-            "youden_j_value": None,
-            "youden_j_f1": None,
-            "youden_j_mcc": None,
             "max_f1_threshold": None,
-            "max_f1_value": None,
-            "max_f1_mcc": None,
+            "max_mcc_threshold": None,
+            "max_precision_threshold": None,
+            "max_recall_threshold": None,
+            "youden_j_threshold": None,
             "selected_f1": None,
             "selected_mcc": None,
+            "selected_precision": None,
+            "selected_recall": None,
             "n_oof": 0,
         }
         if not oof_df.empty:
@@ -1430,11 +1519,10 @@ def run_cross_validation(config: MLQSARConfig,
                     summary.update(threshold_summary)
                     logger.info(
                         f"OOF threshold candidates [{model_key}] | "
-                        f"Youden-J thr={summary['youden_j_threshold']:.4f} (J={summary['youden_j_value']:.4f}, "
-                        f"F1={summary['youden_j_f1']:.4f}) | "
-                        f"Max-F1 thr={summary['max_f1_threshold']:.4f} (F1={summary['max_f1_value']:.4f}, "
-                        f"MCC={summary['max_f1_mcc']:.4f}) | "
-                        f"locked={summary['selected_threshold']:.4f} via {summary['selection_rule']}"
+                        f"Max-F1 thr={summary['max_f1_threshold']:.4f} (F1={summary['selected_f1']:.4f}) | "
+                        f"Max-MCC thr={summary['max_mcc_threshold']:.4f} (MCC={summary['selected_mcc']:.4f}) | "
+                        f"Youden-J thr={summary['youden_j_threshold']:.4f} | "
+                        f"selected thr={summary['selected_threshold']:.4f} via {summary['selection_rule']}"
                     )
                 else:
                     logger.warning(
