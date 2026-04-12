@@ -95,9 +95,8 @@ thresholding:
   curve_points: 501               # threshold grid points for dense sweep (501 = 0.0-1.0 step 0.002)
 
 # Descriptor missing-value handling:
-# - "zero" strategy: fills NaN with impute_value (default 0.0), no dimension expansion
-# - "nan_indicator" strategy: creates __isna features (doubles dimensions), but step33_vs_inference forbids them
+# - step10 now keeps NaN from RDKit failures, then converts to features that preserve "missingness" via indicators.
 descriptor_missing:
-  strategy: "zero"            # options: "zero" | "nan_indicator" -> use "zero" for inference compatibility
+  strategy: "nan_indicator"    # options: "zero" | "nan_indicator" -> use "zero" for inference compatibility
   impute_value: 0.0
   indicator_suffix: "__isna"  # only used if strategy=="nan_indicator"
