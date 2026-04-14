@@ -6,7 +6,7 @@ Usage examples:
     python scripts/step40_plot_performance.py --include-external --include-cv --boxplot-stage both
 
 python scripts/step40_plot_performance.py \
-  --base-dir models_out/qsar_ml_20260409_214751 \
+  --base-dir models_out/qsar_ml_20260412_162829 \
   --include-external \
   --include-cv \
   --boxplot-stage both

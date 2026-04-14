@@ -761,7 +761,7 @@ if _IN_IPYTHON:
     )
 
     # --- Inputs (edit these) ---
-    RUN_DIR = Path("../models_out/qsar_ml_20260410_124055") ### relative path because in notebook
+    RUN_DIR = Path("../models_out/qsar_ml_20260412_162829") ### relative path because in notebook
     SPLIT_SEED = 12345
     MODEL_KEY = "SVC"
     METRIC_LABEL = "ROC-AUC"  # for axis labels only

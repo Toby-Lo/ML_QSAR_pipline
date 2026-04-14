@@ -503,7 +503,7 @@ if _IN_IPYTHON:
     })
 
     # --- Inputs ---
-    OUT_DIR = Path("../models_out/qsar_ml_20260410_124055/split_seed_12345/shap_analysis")     # Relative Path
+    OUT_DIR = Path("../models_out/qsar_ml_20260412_162829/split_seed_12345/shap_analysis")     # Relative Path
     MODEL_KEY = "SVC"   # "LR" or "SVC"
 
     npz_path = OUT_DIR / MODEL_KEY / "shap_values_external.npz"
@@ -553,10 +553,11 @@ if _IN_IPYTHON:
     try:
         n_heat = min(PLOT_STYLE["heatmap_samples"], len(X_df))
 
-        # top features by mean |SHAP|
+        # top features by mean |SHAP| - based on ALL samples (consistent with CSV & beeswarm)
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
         top_idx = np.argsort(mean_abs_shap)[::-1][:15]
 
+        # Select top features from first n_heat samples to plot
         shap_sub = shap_values[:n_heat][:, top_idx]
         X_sub = X_df.iloc[:n_heat, top_idx]
         feature_sub = [feature_display[i] for i in top_idx]
@@ -575,7 +576,7 @@ if _IN_IPYTHON:
             show=False,
         )
 
-        plt.title(f"{MODEL_KEY} | SHAP Heatmap", fontsize=11, pad=10)
+        plt.title(f"{MODEL_KEY} | SHAP Heatmap (n={n_heat})", fontsize=11, pad=10)
         plt.gca().tick_params(axis='y', labelsize=8)
 
         plt.tight_layout()

@@ -2,7 +2,10 @@
 
 Usage examples:
     python scripts/step41_threshold_analysis.py
-    python scripts/step41_threshold_analysis.py --base-dir models_out/qsar_ml_YYYYMMDD_HHMMSS
+    python scripts/step41_threshold_analysis.py --base-dir models_out/qsar_ml_20260412_162829 --model SVC  --seed 12345
+    python scripts/step41_threshold_analysis.py --model SVC,RFC
+    python scripts/step41_threshold_analysis.py --seed 4,9,26,12345
+    python scripts/step41_threshold_analysis.py --model SVC --seed 12345,26
 """
 
 from __future__ import annotations
@@ -22,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot threshold analysis from step10 outputs")
     parser.add_argument("--base-dir", type=Path, help="Run directory (e.g. models_out/qsar_ml_YYYYMMDD_HHMMSS)")
     parser.add_argument("--output-dir", type=Path, help="Figure output directory (default: <base-dir>/figures/threshold_analysis)")
+    parser.add_argument("--model", type=str, help="Filter by model name(s), comma-separated (e.g. 'SVC,RFC' or 'SVC'). If omitted, analyze all models")
+    parser.add_argument("--seed", type=str, help="Filter by split seed(s), comma-separated (e.g. '4,9,26' or '12345'). If omitted, analyze all seeds")
     parser.add_argument("--palette", default="colorblind", help="Seaborn palette name")
     parser.add_argument("--dpi", type=int, default=600, help="Figure DPI")
     parser.add_argument("--font", default="Cambria", help="Serif font for publication style")
@@ -233,15 +238,42 @@ def main() -> None:
     if not available_metrics:
         print("[WARN] threshold_curves_data.csv has no metric columns (Precision, Recall, F1, MCC).")
 
+    # Parse model filter
+    model_filter = None
+    if args.model:
+        model_filter = set(s.strip() for s in args.model.split(",") if s.strip())
+        print(f"[INFO] Filtering to models: {sorted(model_filter)}")
+
+    # Parse seed filter
+    seed_filter = None
+    if args.seed:
+        try:
+            seed_filter = set(int(s.strip()) for s in args.seed.split(",") if s.strip())
+            print(f"[INFO] Filtering to seeds: {sorted(seed_filter)}")
+        except ValueError as e:
+            raise ValueError(f"Invalid seed format. Seeds must be integers, comma-separated: {e}")
+
     models = sorted(curves_df["model"].astype(str).unique().tolist())
+    if model_filter:
+        models = [m for m in models if m in model_filter]
+        if not models:
+            raise ValueError(f"No matching models found. Available: {sorted(curves_df['model'].astype(str).unique().tolist())}")
+    
     palette = sns.color_palette(args.palette, n_colors=max(len(models), 3))
     color_map = {model: palette[idx % len(palette)] for idx, model in enumerate(models)}
 
     saved = 0
-    for seed in sorted(curves_df["split_seed"].dropna().astype(int).unique().tolist()):
+    all_seeds = sorted(curves_df["split_seed"].dropna().astype(int).unique().tolist())
+    seeds = all_seeds if not seed_filter else [s for s in all_seeds if s in seed_filter]
+    if seed_filter and not seeds:
+        raise ValueError(f"No matching seeds found. Available: {sorted(all_seeds)}")
+    
+    for seed in seeds:
         seed_df = curves_df[curves_df["split_seed"].astype(int) == int(seed)]
-        for model in sorted(seed_df["model"].astype(str).unique().tolist()):
+        for model in models:
             model_df = seed_df[seed_df["model"].astype(str) == model].copy()
+            if model_df.empty:
+                continue
             summary_row = None
             if not selection_df.empty:
                 sub = selection_df[

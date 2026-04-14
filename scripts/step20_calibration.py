@@ -2,8 +2,8 @@
 
 Usage:
   python scripts/step20_calibration.py \
-    --run-dir models_out/qsar_ml_20260410_124055 \
-    --input data/NSD2/nsd2_final_dataset_feature_fingerprint.csv \
+    --run-dir models_out/qsar_ml_20260412_162829 \
+    --input ./data/NSD2/nsd2_final_dataset_feature_fingerprint.csv \
     --methods both \
     --calibration-source dev
 
@@ -416,6 +416,7 @@ if __name__ == "__main__":
 
 
 # %%
+# Plot calibration-only cell (interactive)
 # ##################
 # Plotting-only cell (interactive)
 #
@@ -438,7 +439,7 @@ if _IN_IPYTHON:
     from matplotlib import pyplot as plt
 
     PLOT_STYLE: Dict[str, Any] = {
-        "font_family": "Times New Roman",
+        "font_family": "Cambria", # Cambria, Times New Roman
         "font_size": 11,
         "dpi": 600,
         "grid_alpha": 0.25,
@@ -462,10 +463,10 @@ if _IN_IPYTHON:
     )
 
     # --- Inputs (edit these) ---
-    RUN_DIR = Path("../models_out/qsar_ml_20260410_124055") ### Relative path if run in IDE
+    RUN_DIR = Path("../models_out/qsar_ml_20260412_162829") ### Relative path if run in IDE
     SPLIT_SEED = 12345  ### adjust
     MODEL_KEY = "SVC"   ### adjust
-    METHOD = "isotonic"  # sigmoid | isotonic
+    METHOD = "sigmoid"  # sigmoid | isotonic
 
     CURVE_CSV = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{METHOD}" / "calibration_curve.csv"
     if not CURVE_CSV.exists():
