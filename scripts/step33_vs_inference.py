@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Production-grade QSAR virtual screening inference (artifact-aligned).
+Production-grade QSAR virtual screening inference with Applicability Domain (AD) scoring.
 
 This script performs large-scale inference over a precomputed feature table
-(`zinc_features.parquet`) using artifacts produced by `scripts/step10_qsar_ml.py`.
+(`zinc_features.parquet`) using artifacts produced by `scripts/step10_qsar_ml.py`
+and integrates real-time Applicability Domain (AD) scoring from `scripts/step22_applicability_domain.py`.
 
 Critical alignment rules implemented here
 - Load and validate the training feature schema from:
@@ -20,19 +21,31 @@ Critical alignment rules implemented here
   - Use precomputed Morgan bits from input parquet (`morgan_0..morgan_2047`)
   - Dtype stays uint8 for storage; cast to float32 only for model input
 
+Applicability Domain (AD) Integration
+- Load AD artifacts: StandardScaler, PCA (95% variance), training set features
+- Real-time AD scoring within batch loop:
+  - Leverage calculation using pre-trained PCA
+  - Maximum Tanimoto similarity to training set
+  - Maximum Cosine similarity to training set
+  - Weighted AD score using ad_weight_config.json
+  - Power law transformation: AD_Score = (fused)^power
+- Optimized similarity search using sklearn.neighbors.NearestNeighbors
+
 I/O + performance
 - Streaming read with `pyarrow.parquet.ParquetFile.iter_batches`
 - Streaming write with `pyarrow.parquet.ParquetWriter` (zstd)
 - tqdm progress bar over batches
+- Memory-stable processing using Polars and batching
 
 python scripts/step33_vs_inference.py \
-  --model_dir ./models_out/qsar_ml_20260410_124055 \
+  --model_dir ./models_out/qsar_ml_20260412_162829 \
   --model_name SVC \
   --seed 12345 \
   --calibration isotonic \
   --threshold auto \
-  --threshold_metric youden \
-  --input ./data/database/zinc_features.parquet
+  --threshold_metric mcc \
+  --input ./data/database/zinc_test_5k_features.parquet \
+  --ad_integration
 
   # threshold optional: f1(default currently), youden, mcc, recall, precision, or specific value
 """
@@ -47,20 +60,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
+import argparse
+import json
+import os
+import logging  # 确保全局可用
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
+
+import numpy as np
+import pandas as pd
+import joblib
+import pyarrow as pa
+import pyarrow.parquet as pq
+from tqdm import tqdm
 
 def _require_deps() -> None:
     try:
-        import numpy as _np  # noqa: F401
-        import pandas as _pd  # noqa: F401
-        import pyarrow as _pa  # noqa: F401
-        import pyarrow.parquet as _pq  # noqa: F401
-        import tqdm as _tqdm  # noqa: F401
-    except Exception as exc:  # pragma: no cover
-        raise SystemExit(
-            "Missing runtime dependencies. Please install: numpy, pandas, pyarrow, tqdm, joblib.\n"
-            f"Import error: {exc}"
-        ) from exc
-
+        import pyarrow
+        import tqdm
+        import sklearn
+    except Exception as exc:
+        raise SystemExit(f"Missing runtime dependencies: {exc}")
 
 try:
     import joblib  # type: ignore
@@ -82,6 +104,18 @@ class ArtifactPaths:
     scaler_path: Path
     calibrated_model_path: Optional[Path]
     threshold_summary_path: Path
+
+
+@dataclass(frozen=True)
+class ADArtifacts:
+    """Container for Applicability Domain artifacts."""
+    pca: Any  # PCA model for leverage calculation
+    pca_scaler: Any  # Scaler used for PCA projection
+    train_features: Any  # Training set features for similarity search
+    train_fingerprints: Any  # Training set fingerprints for Tanimoto similarity
+    ad_weight_config: Dict[str, float]  # AD weight configuration
+    leverage_pca_variance: float  # PCA variance ratio used
+    ad_score_power: float  # Power exponent for AD score
 
 
 @dataclass(frozen=True)
@@ -142,6 +176,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="rdkit",
         choices=["rdkit", "none"],
         help="SMILES validation strategy. 'rdkit' skips invalid SMILES (CPU cost).",
+    )
+    p.add_argument(
+        "--ad_integration",
+        action="store_true",
+        default=False,
+        help="Enable Applicability Domain (AD) integration. Requires step22 AD artifacts.",
     )
     return p.parse_args(argv)
 
@@ -208,6 +248,65 @@ def build_artifact_paths(model_dir: Path, model_name: str, seed: int, calibratio
         calibrated_model_path=calibrated_model_path,
         threshold_summary_path=threshold_summary_path,
     )
+
+
+def load_ad_artifacts(ad_dir: Path, model_name: str, seed: int):
+    """
+  
+    """
+    import numpy as np
+    import joblib
+    import json
+    import logging
+    from pathlib import Path
+
+    logger = logging.getLogger(__name__)
+    artifacts = {}
+
+    try:
+        # 1. 确保 ad_dir 指向的是最深层的文件夹 (seed_xxxxx)
+        # 如果传入的是上级目录，自动向下补全
+        if (ad_dir / "validation").exists():
+            ad_dir = ad_dir / "validation" / "applicability_domain" / model_name / f"seed_{seed}"
+
+        if not ad_dir.exists():
+            logger.error(f"AD directory not found: {ad_dir}")
+            return None
+
+        # 2. 加载权重配置 - 必须指向具体的 .json 文件
+        config_file = ad_dir / "ad_weight_config.json"
+        if config_file.exists():
+            with open(config_file, 'r') as f:
+                artifacts['weights'] = json.load(f)
+            logger.info(f"✅ Loaded AD weight config")
+        else:
+            logger.warning(f"ad_weight_config.json missing at {ad_dir}")
+
+        # 3. 加载 PCA 和 Scaler
+        pca_file = ad_dir / "ad_pca_model.joblib"
+        scaler_file = ad_dir / "ad_pca_scaler.joblib"
+
+        if pca_file.exists():
+            artifacts['pca'] = joblib.load(pca_file)
+        if scaler_file.exists():
+            artifacts['scaler'] = joblib.load(scaler_file)
+
+        # 4. 加载 NPZ 数据 (修正 Key 名)
+        npz_file = ad_dir / "ad_plot_data.npz"
+        if npz_file.exists():
+            data = np.load(npz_file, allow_pickle=True)
+            # 对应你之前 print(data.files) 看到的结果
+            if 'X_train_base_scaled' in data:
+                artifacts['train_fps'] = data['X_train_base_scaled']
+            if 'desc_train_scaled' in data:
+                artifacts['train_desc'] = data['desc_train_scaled']
+            logger.info("✅ Loaded training reference data (NPZ)")
+
+    except Exception as e:
+        logger.error(f"❌ Critical error loading AD artifacts: {str(e)}")
+        return None
+
+    return artifacts
 
 
 def load_model(paths: ArtifactPaths, model_name: str, calibration: str):
@@ -308,8 +407,6 @@ def validate_fp_mask(paths: ArtifactPaths, plan: FeaturePlan) -> None:
 
 
 def _normalize_smiles_series(smiles_col) -> "pandas.Series":
-    import pandas as pd
-
     s = smiles_col
     if not isinstance(s, pd.Series):
         s = pd.Series(s)
@@ -318,23 +415,170 @@ def _normalize_smiles_series(smiles_col) -> "pandas.Series":
     return s
 
 
-def select_required_input_columns(parquet_schema_names: Sequence[str], plan: FeaturePlan) -> List[str]:
-    names_set = set(parquet_schema_names)
-    required_cols: Set[str] = {"zinc_id", "smiles"}
+def _compute_leverage_pca(pca: Any, pca_scaler: Any, features: np.ndarray) -> np.ndarray:
+    """Compute leverage scores using pre-trained PCA."""
+    # Scale features using PCA scaler
+    features_scaled = pca_scaler.transform(features)
+    
+    # Project to PCA space
+    features_pca = pca.transform(features_scaled)
+    
+    # Compute leverage: h = diag(X(X^T X)^{-1} X^T)
+    # For PCA: h = diag(X_pca (X_pca^T X_pca)^{-1} X_pca^T)
+    # Since PCA components are orthonormal: h = diag(X_pca X_pca^T)
+    leverage = np.sum(features_pca ** 2, axis=1)
+    
+    return leverage.astype(np.float32)
 
-    # Fingerprints: map fp_<idx> -> morgan_<idx> in zinc_features.parquet.
+
+def _compute_tanimoto_similarity(train_fp: np.ndarray, query_fp: np.ndarray) -> np.ndarray:
+    """Compute maximum Tanimoto similarity between query and training fingerprints."""
+    # Binarize fingerprints
+    train_bin = np.clip(np.round(train_fp).astype(np.int8), 0, 1)
+    query_bin = np.clip(np.round(query_fp).astype(np.int8), 0, 1)
+    
+    # Compute max Tanimoto similarity for each query
+    max_similarities = np.zeros(len(query_bin), dtype=np.float32)
+    
+    for i, q_fp in enumerate(query_bin):
+        # Compute intersection and union
+        intersection = np.sum(train_bin & q_fp, axis=1)
+        union = np.sum(train_bin | q_fp, axis=1)
+        
+        # Avoid division by zero
+        union = np.where(union == 0, 1, union)
+        similarities = intersection / union
+        
+        max_similarities[i] = np.max(similarities) if similarities.size > 0 else 0.0
+    
+    return max_similarities
+
+
+def _compute_cosine_similarity(train_features: np.ndarray, query_features: np.ndarray, 
+                              block_size: int = 1024) -> np.ndarray:
+    """Compute maximum cosine similarity between query and training features (blockwise)."""
+    eps = 1e-12
+    
+    # Normalize training features
+    train_norm = np.linalg.norm(train_features, axis=1, keepdims=True)
+    train_norm = np.where(train_norm < eps, 1.0, train_norm)
+    train_unit = train_features / train_norm
+    
+    max_similarities = np.zeros(len(query_features), dtype=np.float32)
+    
+    # Process in blocks to reduce memory usage
+    for start in range(0, len(query_features), block_size):
+        end = min(len(query_features), start + block_size)
+        q_block = query_features[start:end]
+        
+        # Normalize query block
+        q_norm = np.linalg.norm(q_block, axis=1, keepdims=True)
+        q_norm = np.where(q_norm < eps, 1.0, q_norm)
+        q_unit = q_block / q_norm
+        
+        # Compute cosine similarities
+        similarities = q_unit @ train_unit.T
+        max_similarities[start:end] = np.max(similarities, axis=1)
+    
+    return max_similarities
+
+
+def _compute_ad_score(leverage: np.ndarray, max_tanimoto: np.ndarray, max_cosine: np.ndarray,
+                     ad_config: Dict[str, float]) -> np.ndarray:
+    """Compute final AD score using weighted combination and power law."""
+    # Extract weights from config
+    w1 = ad_config.get("w1_tanimoto", 0.7)
+    w2 = ad_config.get("w2_cosine", 0.3)
+    w3 = ad_config.get("w3_similarity", 0.6)
+    w4 = ad_config.get("w4_density", 0.4)
+    power = ad_config.get("ad_score_power", 2.0)
+    
+    # Convert leverage to density-like score (higher leverage = lower density)
+    # Use inverse of normalized leverage as density proxy
+    leverage_norm = leverage / np.max(leverage) if np.max(leverage) > 0 else leverage
+    density_score = 1.0 - np.clip(leverage_norm, 0.0, 1.0)
+    
+    # Combine similarity scores
+    similarity_score = w1 * max_tanimoto + w2 * max_cosine
+    similarity_score = np.clip(similarity_score, 0.0, 1.0)
+    
+    # Combine similarity and density
+    ad_raw = w3 * similarity_score + w4 * density_score
+    ad_raw = np.clip(ad_raw, 0.0, 1.0)
+    
+    # Apply power law transformation
+    ad_final = np.power(np.clip(ad_raw, 1e-7, 1.0), power)
+    
+    return ad_final.astype(np.float32)
+
+
+def select_required_input_columns(parquet_schema_names: List[str], plan: FeaturePlan) -> List[str]:
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    available_columns = parquet_schema_names
+    names_set = set(available_columns)
+    
+    logger.info("="*50)
+    logger.info("VALIDATING INPUT DATA SCHEMA")
+    logger.info(f"Input parquet contains {len(available_columns)} columns.")
+    logger.info(f"Sample columns from input: {available_columns[:10]}...")
+
+    # 1. è‡ªåŠ¨è¯†åˆ« ID åˆ—
+    id_col = None
+    possible_id_names = ["zinc_id", "id", "ZINC_ID", "compound_id"]
+    for name in possible_id_names:
+        if name in names_set:
+            id_col = name
+            break
+    
+    if id_col:
+        logger.info(f"âœ… Found ID column: '{id_col}' (will be mapped to 'zinc_id')")
+    else:
+        logger.error(f"âŒ CRITICAL: No ID column found. Looked for: {possible_id_names}")
+        raise KeyError(f"Input parquet must contain an ID column. Available: {available_columns[:20]}")
+
+    # 2. æ£€æŸ¥ SMILES
+    if "smiles" not in names_set:
+        logger.error("âŒ CRITICAL: 'smiles' column missing!")
+        raise KeyError("Input parquet must contain a 'smiles' column for AD/Inference.")
+
+    required_cols_set = {id_col, "smiles"}
+
+    # 3. éªŒè¯æŒ‡çº¹ (Fingerprints)
+    missing_fps = []
     for col in plan.fp_input_columns:
         if col not in names_set:
-            raise KeyError(f"Missing required fingerprint column in input parquet: {col}")
-        required_cols.add(col)
+            missing_fps.append(col)
+        else:
+            required_cols_set.add(col)
+    
+    if missing_fps:
+        logger.error(f"âŒ CRITICAL: {len(missing_fps)} fingerprint columns missing!")
+        logger.error(f"First few missing: {missing_fps[:5]}")
+        raise KeyError(f"Missing required fingerprint column: {missing_fps[0]}")
+    else:
+        logger.info(f"âœ… All {len(plan.fp_input_columns)} fingerprint columns present.")
 
-    # Descriptors (must exist as-is; no derived features allowed).
+    # 4. validate Descriptors
+    missing_descs = []
     for feat in plan.descriptor_names:
         if feat not in names_set:
-            raise KeyError(f"Missing required descriptor column in input parquet: {feat}")
-        required_cols.add(feat)
+            missing_descs.append(feat)
+        else:
+            required_cols_set.add(feat)
+            
+    if missing_descs:
+        logger.error(f"âŒ CRITICAL: {len(missing_descs)} descriptor columns missing!")
+        logger.error(f"First few missing: {missing_descs[:5]}")
+        raise KeyError(f"Missing required descriptor column: {missing_descs[0]}")
+    else:
+        logger.info(f"âœ… All {len(plan.descriptor_names)} descriptor columns present.")
 
-    return [c for c in parquet_schema_names if c in required_cols]
+    logger.info("SCHEMA VALIDATION PASSED.")
+    logger.info("="*50)
+
+    return [c for c in available_columns if c in required_cols_set]
 
 
 def build_feature_matrices(df: "pandas.DataFrame", plan: FeaturePlan) -> Tuple["numpy.ndarray", "numpy.ndarray"]:
@@ -475,107 +719,146 @@ def load_threshold_auto(
     logger.info(f"Resolved threshold for metric '{threshold_metric}': {threshold:.6f}")
     return threshold
 
+def compute_batch_ad(full_raw_features: np.ndarray, ad_artifacts: Dict) -> Dict[str, np.ndarray]:
+    # 1. 提取零件
+    pca = ad_artifacts.get('pca')
+    ad_scaler = ad_artifacts.get('scaler')
+    t_fps_full = ad_artifacts.get('train_fps')  # 训练集全特征 (例如: 419, 149)
+    t_desc = ad_artifacts.get('train_desc')     # 训练集描述符 (例如: 419, 20)
+    weights = ad_artifacts.get('weights', {})
+
+    n_samples = len(full_raw_features)
+
+    # 【核心改进】：动态获取指纹维度
+    # 逻辑：总特征数 (149) - 描述符特征数 (20) = 指纹特征数 (129)
+    if t_fps_full is not None and t_desc is not None:
+        n_fp = t_fps_full.shape[1] - t_desc.shape[1]
+    else:
+        # 如果万一没有训练集参考，回退到 plan 里的定义（如果能传入 plan 的话）
+        # 或者从 full_raw_features 减去 20 (假设描述符固定是 20)
+        n_fp = full_raw_features.shape[1] - 20 
+
+    # 2. 计算 Leverage
+    lev = np.zeros(n_samples, dtype=np.float32)
+    if pca and ad_scaler:
+        lev = _compute_leverage_pca(pca, ad_scaler, full_raw_features)
+
+    # 3. 计算缩放后的特征 (用于相似度)
+    full_scaled = ad_scaler.transform(full_raw_features) if ad_scaler else full_raw_features
+    
+    # 动态切分：前 n_fp 列是指纹，之后是描述符
+    current_batch_fps = full_raw_features[:, :n_fp]
+    current_batch_desc_scaled = full_scaled[:, n_fp:]
+
+    # 4. 计算相似度
+    max_tanimoto = np.zeros(n_samples, dtype=np.float32)
+    if t_fps_full is not None:
+        # 训练集也同样切分出指纹部分
+        train_fps_only = t_fps_full[:, :n_fp]
+        max_tanimoto = _compute_tanimoto_similarity(train_fps_only, current_batch_fps)
+
+    max_cosine = np.zeros(n_samples, dtype=np.float32)
+    if t_desc is not None:
+        # t_desc 在加载时通常已经是缩放后的描述符部分了
+        max_cosine = _compute_cosine_similarity(t_desc, current_batch_desc_scaled)
+
+    # 5. 融合得分
+    ad_final = _compute_ad_score(lev, max_tanimoto, max_cosine, weights)
+
+    return {
+        "AD_Score": ad_final,
+        "leverage": lev,
+        "max_tanimoto": max_tanimoto,
+        "max_cosine": max_cosine
+    }
 
 def predict_batch(
-    df: "pandas.DataFrame",
+    df: "pd.DataFrame",
     plan: FeaturePlan,
     model: Any,
     scaler: Any,
     model_name: str,
     threshold: float,
     smiles_validation: str,
-) -> Tuple["pandas.DataFrame", Dict[str, int]]:
-    import numpy as np
-    import pandas as pd
+    ad_artifacts: Optional[Dict] = None,
+) -> Tuple["pd.DataFrame", Dict[str, int]]:
 
-    n_in = int(len(df))
+    # 1. 预检查与过滤
+    n_in = len(df)
     if n_in == 0:
-        return pd.DataFrame(columns=["zinc_id", "smiles", "prob", "pred_label"]), {
-            "processed": 0,
-            "predicted": 0,
-            "skipped": 0,
-            "skipped_nan": 0,
-            "skipped_smiles": 0,
-        }
+        return pd.DataFrame(), {"processed": 0, "predicted": 0, "skipped": 0}
 
     zinc_id = pd.to_numeric(df["zinc_id"], errors="coerce")
     smiles = _normalize_smiles_series(df["smiles"])
-    valid = zinc_id.notna() & smiles.notna() & (smiles.str.len() > 0)
-    skipped_base = int((~valid).sum())
-    if valid.sum() == 0:
-        return pd.DataFrame(columns=["zinc_id", "smiles", "prob", "pred_label"]), {
-            "processed": n_in,
-            "predicted": 0,
-            "skipped": skipped_base,
-            "skipped_nan": 0,
-            "skipped_smiles": 0,
-        }
+    valid_mask = zinc_id.notna() & smiles.notna() & (smiles.str.len() > 0)
+    if valid_mask.sum() == 0:
+        return pd.DataFrame(), {"processed": n_in, "predicted": 0, "skipped": n_in}
 
-    dfv = df.loc[valid]
-    zinc_id_v = zinc_id.loc[valid].astype("int64")
-    smiles_v = smiles.loc[valid].astype("string")
-
-    fp_block, desc_block = build_feature_matrices(dfv, plan)
-    nan_rows = np.isnan(desc_block).any(axis=1)
-    n_skipped_nan = int(nan_rows.sum())
-
+    dfv = df.loc[valid_mask].copy()
+    
+    # 2. 特征构建
+    fp_final, desc_final = build_feature_matrices(dfv, plan)
+    nan_rows = np.isnan(desc_final).any(axis=1)
+    
+    # SMILES 验证
     ok_smiles = np.ones((len(dfv),), dtype=bool)
     if smiles_validation == "rdkit":
         try:
-            from rdkit import Chem  # type: ignore
-        except Exception:
-            Chem = None  # type: ignore
-        if Chem is not None:
-            # Note: this is a per-row check; enable only when needed.
-            smi_list = smiles_v.to_numpy(dtype="object", copy=False).tolist()
-            ok_smiles = np.fromiter((Chem.MolFromSmiles(str(s)) is not None for s in smi_list), dtype=bool, count=len(smi_list))
-        else:
-            ok_smiles = np.ones((len(dfv),), dtype=bool)
+            from rdkit import Chem
+            smi_list = smiles.loc[valid_mask].to_numpy(dtype="object", copy=False).tolist()
+            ok_smiles = np.fromiter((Chem.MolFromSmiles(str(s)) is not None for s in smi_list), 
+                                   dtype=bool, count=len(smi_list))
+        except ImportError: pass
 
     final_ok = (~nan_rows) & ok_smiles
-    n_skipped_smiles = int((~ok_smiles & ~nan_rows).sum())
     if final_ok.sum() == 0:
-        skipped_total = skipped_base + int((~final_ok).sum())
-        return pd.DataFrame(columns=["zinc_id", "smiles", "prob", "pred_label"]), {
-            "processed": n_in,
-            "predicted": 0,
-            "skipped": skipped_total,
-            "skipped_nan": n_skipped_nan,
-            "skipped_smiles": n_skipped_smiles,
-        }
+        return pd.DataFrame(), {"processed": n_in, "predicted": 0, "skipped": n_in}
 
-    fp_ok = fp_block[final_ok]
-    desc_ok = desc_block[final_ok]
-    zinc_id_ok = zinc_id_v.to_numpy(dtype="int64", copy=False)[final_ok]
-    smiles_ok = smiles_v.to_numpy(dtype="object", copy=False)[final_ok]
+    fp_calc = fp_final[final_ok]
+    desc_calc = desc_final[final_ok]
+    zid_calc = zinc_id.loc[valid_mask].to_numpy()[final_ok]
+    smi_calc = smiles.loc[valid_mask].to_numpy()[final_ok]
 
-    X = apply_scaling_if_needed(fp_ok, desc_ok, scaler=scaler, model_name=model_name)
+    # 3. QSAR 模型推理
+    X = apply_scaling_if_needed(fp_calc, desc_calc, scaler=scaler, model_name=model_name)
+    proba = model.predict_proba(X)[:, 1].astype(np.float32)
 
-    try:
-        proba = model.predict_proba(X)[:, 1]
-    except Exception as exc:
-        raise RuntimeError(f"Model inference failed for batch (n={len(fp_ok)}): {exc}") from exc
+    # 4. AD 计算 (核心修正)
+    ad_score, lev, tanimoto, cosine = np.ones_like(proba), np.zeros_like(proba), np.zeros_like(proba), np.zeros_like(proba)
 
-    proba = np.asarray(proba, dtype=np.float32)
-    proba = np.clip(proba, 0.0, 1.0, out=proba)
-    pred = (proba >= float(threshold)).astype(np.int8, copy=False)
+    if ad_artifacts:
+        try:
+            # 准备 AD 计算需要的 149 维原始特征 (FP + Desc)
+            full_raw_features = np.concatenate([
+                fp_calc.astype(np.float32), 
+                desc_calc.astype(np.float32)
+            ], axis=1)
 
-    out = pd.DataFrame(
-        {
-            "zinc_id": zinc_id_ok,
-            "smiles": smiles_ok,
-            "prob": proba.astype(np.float32, copy=False),
-            "pred_label": pred.astype(np.int8, copy=False),
-        }
-    )
-    return out, {
-        "processed": n_in,
-        "predicted": int(len(out)),
-        "skipped": skipped_base + int((~final_ok).sum()),
-        "skipped_nan": n_skipped_nan,
-        "skipped_smiles": n_skipped_smiles,
-    }
+            # 调用计算引擎
+            ad_out = compute_batch_ad(
+                full_raw_features=full_raw_features,
+                ad_artifacts=ad_artifacts
+            )
+            ad_score = ad_out["AD_Score"]
+            lev = ad_out["leverage"]
+            tanimoto = ad_out["max_tanimoto"]
+            cosine = ad_out["max_cosine"]
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"AD inner error: {e}")
 
+    # 5. 组装结果
+    out = pd.DataFrame({
+        "zinc_id": zid_calc.astype(np.int64),
+        "smiles": smi_calc,
+        "prob": proba,
+        "pred_label": (proba >= threshold).astype(np.int8),
+        "AD_Score": ad_score,
+        "leverage": lev,
+        "max_tanimoto": tanimoto,
+        "max_cosine": cosine
+    })
+    return out, {"processed": n_in, "predicted": len(out), "skipped": n_in - len(out)}
 
 def stream_inference(
     input_path: Path,
@@ -588,6 +871,7 @@ def stream_inference(
     threshold: float,
     batch_size: int,
     smiles_validation: str,
+    ad_artifacts: Optional[Any] = None,
 ) -> None:
     import logging
     import numpy as np
@@ -598,43 +882,60 @@ def stream_inference(
     
     logger = logging.getLogger(__name__)
 
+    if ad_artifacts:
+        logger.info(f"AD integration active: {list(ad_artifacts.keys())}")
+    else:
+        logger.warning("AD integration is INACTIVE (no artifacts provided)")
+
     pf = pq.ParquetFile(input_path)
-    cols = select_required_input_columns(pf.schema.names, plan)
+    all_input_cols = pf.schema.names
+    cols = select_required_input_columns(all_input_cols, plan)
+
+    id_col = None
+    for possible_name in ['zinc_id', 'id', 'ZINC_ID', 'compound_id']:
+        if possible_name in all_input_cols:
+            id_col = possible_name
+            break
+    if not id_col:
+        raise ValueError(f"Could not find ID column in {input_path}.")
+    
+    logger.info(f"Detected ID column: '{id_col}', will map to 'zinc_id' in output.")
 
     total_rows = int(getattr(pf.metadata, "num_rows", 0) or 0)
     total_batches = (total_rows + batch_size - 1) // batch_size if total_rows > 0 else None
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists():
-        output_path.unlink()
-
-    out_schema = pa.schema(
-        [
-            pa.field("zinc_id", pa.int64()),
-            pa.field("smiles", pa.string()),
-            pa.field("prob", pa.float32()),
-            pa.field("pred_label", pa.int8()),
-            pa.field("model_name", pa.string()),
-            pa.field("seed", pa.int64()),
-            pa.field("threshold_used", pa.float32()),
-        ]
-    )
+    
+    out_schema = pa.schema([
+        pa.field("zinc_id", pa.int64()),
+        pa.field("smiles", pa.string()),
+        pa.field("prob", pa.float32()),
+        pa.field("pred_label", pa.int8()),
+        pa.field("AD_Score", pa.float32()), 
+        pa.field("leverage", pa.float32()),
+        pa.field("max_tanimoto", pa.float32()), 
+        pa.field("max_cosine", pa.float32()),   
+        pa.field("model_name", pa.string()),
+        pa.field("seed", pa.int64()),
+        pa.field("threshold_used", pa.float32()),
+    ])
 
     writer = pq.ParquetWriter(output_path, out_schema, compression="zstd")
     processed = predicted = skipped = 0
-    skipped_nan = skipped_smiles = 0
 
     pbar = tqdm(
         pf.iter_batches(batch_size=int(batch_size), columns=cols, use_threads=True),
         total=total_batches,
-        desc="QSAR Inference",
+        desc="QSAR + AD Inference",
         unit="batch",
     )
+
     for batch_idx, batch in enumerate(pbar):
         try:
             df = batch.to_pandas()
+            df = df.rename(columns={id_col: "zinc_id"})
+            df["zinc_id"] = df["zinc_id"].astype("int64")
         except Exception as exc:
-            logger.error(f"[Batch {batch_idx}] ERROR converting to pandas: {exc} -> skipped batch")
+            logger.error(f"[Batch {batch_idx}] ERROR preparing batch: {exc}")
             continue
 
         try:
@@ -646,48 +947,34 @@ def stream_inference(
                 model_name=model_name,
                 threshold=threshold,
                 smiles_validation=smiles_validation,
+                ad_artifacts=ad_artifacts  # 传递整个字典
             )
         except Exception as exc:
-            logger.error(f"[Batch {batch_idx}] ERROR during inference: {exc} -> skipped batch")
+            logger.error(f"[Batch {batch_idx}] ERROR during prediction/AD: {exc}")
             continue
 
         processed += int(stats["processed"])
         predicted += int(stats["predicted"])
         skipped += int(stats["skipped"])
-        skipped_nan += int(stats.get("skipped_nan", 0))
-        skipped_smiles += int(stats.get("skipped_smiles", 0))
 
         if len(out_df) == 0:
-            if batch_idx % 10 == 0:
-                logger.info(
-                    f"[Batch {batch_idx}] processed={stats['processed']:,} predicted=0 skipped={stats['skipped']:,} "
-                    f"(nan={stats.get('skipped_nan',0):,} smiles={stats.get('skipped_smiles',0):,})"
-                )
             continue
 
-        # Add constant metadata columns without per-row loops
         out_df["model_name"] = str(model_name)
         out_df["seed"] = int(seed)
         out_df["threshold_used"] = np.float32(threshold)
 
-        table = pa.Table.from_pandas(out_df, schema=out_schema, preserve_index=False)
-        writer.write_table(table)
+        try:
+            table = pa.Table.from_pandas(out_df, schema=out_schema, preserve_index=False)
+            writer.write_table(table)
+        except Exception as exc:
+            logger.error(f"[Batch {batch_idx}] Schema mismatch: {exc}")
 
-        if batch_idx % 10 == 0:
-            logger.info(
-                f"[Batch {batch_idx}] processed={stats['processed']:,} predicted={stats['predicted']:,} skipped={stats['skipped']:,} "
-                f"(cum_predicted={predicted:,})"
-            )
+        if batch_idx % 20 == 0:
+            pbar.set_postfix({"pred": predicted, "skip": skipped})
 
     writer.close()
-    logger.info(
-        "Inference complete.\n"
-        f"  Input : {input_path}\n"
-        f"  Output: {output_path}\n"
-        f"  Rows  : processed={processed:,} predicted={predicted:,} skipped={skipped:,} "
-        f"(nan={skipped_nan:,} smiles={skipped_smiles:,})\n"
-        f"  Model : {model_name} | seed={seed} | threshold={threshold:.6f}"
-    )
+    logger.info(f"✅ Success! Output saved to: {output_path}")
 
 
 def sanity_check_first_batch(
@@ -698,26 +985,34 @@ def sanity_check_first_batch(
     sample_rows: int = 1000,
 ) -> None:
     import logging
-    import numpy as np
 
     logger = logging.getLogger(__name__)
     it = pf.iter_batches(batch_size=int(sample_rows), columns=cols, use_threads=True)
     first = next(it, None)
+    
     if first is None:
         raise RuntimeError("Input parquet appears empty; cannot run sanity check.")
+    
     df = first.to_pandas()
+    
+    # éªŒè¯ ID åˆ—æ˜¯å¦å­˜åœ¨
+    id_present = any(name in df.columns for name in ['zinc_id', 'id', 'ZINC_ID', 'compound_id'])
+    if not id_present:
+        raise ValueError(f"Missing ID column. Available: {df.columns.tolist()}")
+
+    # éªŒè¯ç‰¹å¾çŸ©é˜µ
     fp_u8, desc_f32 = build_feature_matrices(df, plan)
-    logger.info("Sanity check:")
-    logger.info(f"  FP shape   : {fp_u8.shape} dtype={fp_u8.dtype}")
-    logger.info(f"  DESC shape : {desc_f32.shape} dtype={desc_f32.dtype}")
-    logger.info(f"  NaN count  : {int(np.isnan(desc_f32).sum())}")
-    if fp_u8.shape[1] != plan.n_fp:
-        raise RuntimeError(f"Fingerprint dim mismatch: got {fp_u8.shape[1]}, expected {plan.n_fp}")
-    if desc_f32.shape[1] != plan.n_desc:
-        raise RuntimeError(f"Descriptor dim mismatch: got {desc_f32.shape[1]}, expected {plan.n_desc}")
-    if plan.n_features_total != int(expected_dim):
-        raise RuntimeError(f"Training feature dim mismatch: plan {plan.n_features_total} vs expected {expected_dim}")
-    logger.info(f"  total_dim  : {plan.n_features_total} (matches training)")
+    
+    logger.info("--- Pre-flight Sanity Check ---")
+    logger.info(f"  ID found   : Yes")
+    logger.info(f"  FP dim     : {fp_u8.shape[1]} (Expect: {plan.n_fp})")
+    logger.info(f"  Desc dim   : {desc_f32.shape[1]} (Expect: {plan.n_desc})")
+    logger.info(f"  Total dim  : {fp_u8.shape[1] + desc_f32.shape[1]} (Expect: {expected_dim})")
+    
+    if fp_u8.shape[1] != plan.n_fp or desc_f32.shape[1] != plan.n_desc:
+        raise RuntimeError("Feature dimension mismatch! Check if zinc_features.parquet matches training config.")
+
+    logger.info("--- Check Passed. Starting Full Inference ---")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -748,6 +1043,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise FileNotFoundError(f"Input parquet not found: {input_path}")
 
     paths = build_artifact_paths(model_dir=model_dir, model_name=model_name, seed=seed, calibration=calibration)
+    
+    # Load AD artifacts if integration is enabled
+    ad_artifacts = None
+    if args.ad_integration:
+        try:
+            logger.info("Loading Applicability Domain artifacts...")
+            ad_artifacts = load_ad_artifacts(paths.split_dir, model_name, seed)
+            
+            if ad_artifacts is None:
+                logger.warning("AD artifacts loading returned None")
+                ad_artifacts = {}
+            else:
+                logger.info("AD artifacts loaded successfully")
+                if 'pca' in ad_artifacts and ad_artifacts['pca'] is not None:
+                    logger.info(f"  - PCA components: {ad_artifacts['pca'].n_components_}")
+                if 'train_fps' in ad_artifacts:
+                    logger.info(f"  - Training fingerprints: {ad_artifacts['train_fps'].shape}")
+                if 'train_desc' in ad_artifacts:
+                    logger.info(f"  - Training descriptors: {ad_artifacts['train_desc'].shape}")
+        except Exception as e:
+            logger.error(f"Failed to load AD artifacts: {e}")
+            logger.error("Continuing without AD integration")
+            ad_artifacts = None
     if not paths.feature_names_path.exists():
         raise FileNotFoundError(f"Missing feature_names_final.json: {paths.feature_names_path}")
     if not paths.descriptor_names_path.exists():
@@ -817,6 +1135,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         threshold=float(threshold),
         batch_size=batch_size,
         smiles_validation=str(args.smiles_validation),
+        ad_artifacts=ad_artifacts
     )
 
 

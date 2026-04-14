@@ -82,7 +82,7 @@ Usage (CLI):
     --tanimoto-threshold 0.80 \
     --domain-threshold-quantile 0.90 \
     --strict-similarity \
-    --compare-calibration 
+    --compare-calibration
 
 
 Usage (interactive):
@@ -363,7 +363,9 @@ def _compute_leverage_pca(
     X_train_scaled: np.ndarray,
     X_query_scaled: np.ndarray,
     variance_ratio: float,
-    fixed_components: Optional[int] = None
+    fixed_components: Optional[int] = None,
+    ad_output_dir: Optional[Path] = None,
+    scaler_to_save: Optional[Any] = None
 ) -> Tuple[np.ndarray, float, int]:
     """
     Compute leverage in a PCA subspace.
@@ -378,50 +380,64 @@ def _compute_leverage_pca(
         (leverage_scores, h_star_threshold, n_components)
     """
 
-    # --- 插入调试代码开始 ---
+    # Debug
     import numpy as np
+    import joblib
+    from sklearn.decomposition import PCA
+
     train_var = np.var(X_train_scaled, axis=0)
     zero_var_cols = np.sum(train_var < 1e-9)
-    print(f"\n[DEBUG] PCA Input Shape: {X_train_scaled.shape}")
-    print(f"[DEBUG] Zero variance columns: {zero_var_cols} / {X_train_scaled.shape[1]}")
+    logging.info(f"[PCA] 输入形状: {X_train_scaled.shape}, 零方差列数: {zero_var_cols}")
     
     if X_train_scaled.shape[1] - zero_var_cols < 1:
-         print("[DEBUG] CRITICAL: No valid features for PCA!")
-    # --- 插入调试代码结束 ---
+         raise ValueError("错误：没有有效的特征可以用于 PCA 计算！")
 
-
-
-    # Determine n_components strategy
+    # --- 2. 配置 PCA 策略 ---
     if fixed_components is not None:
-        # Fixed integer components (more stable)
         n_comp = int(max(1, min(fixed_components, X_train_scaled.shape[1])))
         pca = PCA(n_components=n_comp, svd_solver="full")
-        logging.debug(f"PCA: using fixed n_components={n_comp}")
+        logging.debug(f"使用固定主成分数: {n_comp}")
     else:
-        # Variance ratio strategy (dynamic)
-        n_comp = float(variance_ratio)
-        pca = PCA(n_components=n_comp, svd_solver="full")
-        logging.debug(f"PCA: using variance_ratio={variance_ratio:.2%}")
+        # 自动根据方差贡献率选择
+        pca = PCA(n_components=float(variance_ratio), svd_solver="full")
+        logging.debug(f"使用方差贡献率阈值: {variance_ratio:.2%}")
     
+    # --- 3. 执行拟合与投影 ---
     X_train_pca = pca.fit_transform(X_train_scaled)
     X_query_pca = pca.transform(X_query_scaled)
+    n_p = int(X_train_pca.shape[1])
+    logging.info(f"PCA 提取完成，实际保留成分数: {n_p}")
 
-    print(f"[DEBUG] Actual PCA components extracted: {X_train_pca.shape[1]}")
+    # --- 4. 关键：导出模型与配套 Scaler ---
+    if ad_output_dir:
+        ad_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存 PCA 模型
+        pca_path = ad_output_dir / "ad_pca_model.joblib"
+        joblib.dump(pca, pca_path)
+        logging.info(f"已导出 AD PCA 模型: {pca_path}")
+        
+        # 保存配套的 Scaler (如果没有它，推理时的特征缩放会不一致)
+        if scaler_to_save:
+            scaler_path = ad_output_dir / "ad_pca_scaler.joblib"
+            joblib.dump(scaler_to_save, scaler_path)
+            logging.info(f"已导出配套 Scaler: {scaler_path}")
 
-    XtX = X_train_pca.T @ X_train_pca
-    inv = np.linalg.pinv(XtX)
-    h_query = np.einsum("ij,jk,ik->i", X_query_pca, inv, X_query_pca)
+    # --- 5. 计算 Leverage (Hat Matrix 对角线) ---
+    # 公式: h = diag(X_q @ (X_train^T @ X_train)^-1 @ X_q^T)
+    try:
+        XtX = X_train_pca.T @ X_train_pca
+        inv = np.linalg.pinv(XtX) # 使用伪逆确保数值稳定性
+        h_query = np.einsum("ij,jk,ik->i", X_query_pca, inv, X_query_pca)
+    except np.linalg.LinAlgError as e:
+        logging.error(f"矩阵求逆失败: {e}")
+        h_query = np.zeros(X_query_pca.shape[0])
 
-    p = int(X_train_pca.shape[1])
-    n = int(X_train_pca.shape[0])
-    h_star = (3.0 * p) / n if n > 0 else float("inf")
+    # 计算警告阈值 h* (3p/n)
+    n_samples = int(X_train_pca.shape[0])
+    h_star = (3.0 * n_p) / n_samples if n_samples > 0 else 0.0
     
-    logging.info(
-        f"✓ PCA Leverage computed: n_components={p}, h_star={h_star:.4f}, "
-        f"leverage_mean={np.mean(h_query):.4f}±{np.std(h_query):.4f}"
-    )
-    
-    return h_query.astype(np.float64), float(h_star), p
+    return h_query.astype(np.float64), float(h_star), int(X_train_pca.shape[1])
 
 
 def _per_sample_log_loss(y_true: np.ndarray, y_prob: np.ndarray, eps: float = 1e-9) -> np.ndarray:
@@ -1056,9 +1072,20 @@ def _apply_detected_calibration_config(
 def compute_and_export(config: ADConfig) -> Dict[str, Any]:
     run_dir = config.run_dir
     split_seed = int(config.split_seed)
-    split_dir = run_dir / f"split_seed_{split_seed}"
+    split_dir = Path(config.run_dir) / f"split_seed_{config.split_seed}"
 
-    # 🆕 Step 0: Auto-detect calibration configuration
+    ad_output_dir = (
+        split_dir / 
+        "validation" / 
+        "applicability_domain" / 
+        config.model_key /   
+        f"seed_{config.split_seed}"
+    )
+    
+    ad_output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"AD artifacts will be saved to: {ad_output_dir}")
+
+    # Step 0: Auto-detect calibration configuration
     if config.detect_calibration and _CALIBRATION_INTEGRATION_AVAILABLE:
         config = _apply_detected_calibration_config(config, run_dir, split_seed)
 
@@ -1227,6 +1254,8 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
             X_query_scaled=X_ext_base_scaled,
             variance_ratio=config.leverage_pca_variance,
             fixed_components=config.leverage_pca_components,
+            ad_output_dir=ad_output_dir,
+            scaler_to_save=base_scaler
         )
         base_in_domain = leverage <= h_star
     elif base_method == "mahalanobis":

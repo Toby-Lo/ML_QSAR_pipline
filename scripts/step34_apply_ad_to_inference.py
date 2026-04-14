@@ -13,7 +13,7 @@ Key optimizations:
 - Comprehensive logging with timestamps and progress bars
 
 Usage:
-python scripts/step35_apply_ad_to_inference.py \
+python scripts/step34_apply_ad_to_inference.py \
   --vs-predictions models_out/qsar_ml_20260412_162829/virtual_screening/zinc_predictions_20260412_171703.parquet \
   --ad-file models_out/qsar_ml_20260412_162829/split_seed_12345/validation/applicability_domain/SVC/seed_12345/ad_external_predictions.csv \
   --top-n 10000 \
@@ -21,7 +21,7 @@ python scripts/step35_apply_ad_to_inference.py \
   --ad-threshold 0.3 \
   --output-dir models_out/qsar_ml_20260412_162829/virtual_screening/zinc_top_10k
 
-python scripts/step35_apply_ad_to_inference.py \
+python scripts/step34_apply_ad_to_inference.py \
   --vs-predictions ./models_out/qsar_ml_20260412_162829/virtual_screening/zinc_predictions_20260412_171703.parquet \
   --ad-file ./models_out/qsar_ml_20260412_162829/split_seed_12345/validation/applicability_domain/SVC/seed_12345/ad_external_predictions.csv \
   --top-percent 0.1 \
