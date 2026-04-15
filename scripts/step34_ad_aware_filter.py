@@ -393,3 +393,131 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# %%
+# Plotting-only cell (interactive)
+##############################################################################
+# Goal:
+#   - Visualize AD-aware screening results WITHOUT recomputation
+#   - Diagnose AD impact on ranking and analyze chemical space coverage
+#   - Export publication-ready figures (PNG + SVG)
+##############################################################################
+
+import os, json, sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+
+def _in_ipython():
+    try: return __IPYTHON__ is not None
+    except NameError: return False
+
+if _in_ipython():
+    # --- USER EDITABLE ---
+    OUT_DIR = Path("../models_out/qsar_ml_20260412_162829/virtual_screening/ad_screening_results_20260415_105720")
+    # ---------------------
+
+    PLOT_STYLE = {
+        "font.family": "serif",
+        "font.serif": ["Cambria"], # "Times New Roman", "Cambria"
+        "font.size": 11,
+        "axes.linewidth": 1.1,
+        "grid.alpha": 0.25,
+        "savefig.dpi": 600,
+        "axes.spines.top": False,
+        "axes.spines.right": False
+    }
+
+    def _setup():
+        plt.rcParams.update(PLOT_STYLE)
+        fig_dir = OUT_DIR / "figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        return fig_dir
+
+    def _save(fig, name, fig_dir):
+        for ext in ['png', 'svg']:
+            fig.savefig(fig_dir / f"{name}.{ext}", bbox_inches='tight')
+        plt.show()
+
+    def _load():
+        r_path, t_path = OUT_DIR / "ranked_results.parquet", OUT_DIR / "top_candidates.parquet"
+        if not (r_path.exists() and t_path.exists()):
+            raise FileNotFoundError(f"Missing data in {OUT_DIR}")
+        return pd.read_parquet(r_path), pd.read_parquet(t_path)
+
+    fig_dir = _setup()
+    df, top_df = _load()
+
+    # A. Distribution diagnostics
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    for ax, col, color in zip(axes, ["prob", "AD_Score", "Final_Score"], ["#440154", "#21918c", "#fde725"]):
+        sns.histplot(df[col], bins=50, kde=True, ax=ax, color=color, edgecolor='none')
+        ax.set_title(f"Distribution: {col}")
+    _save(fig, "fig1_distribution", fig_dir)
+
+    # B. Relationship: Prob vs AD_Score
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sc = ax.scatter(df["prob"], df["AD_Score"], c=df["Final_Score"], cmap="viridis", s=10, alpha=0.5)
+    plt.colorbar(sc, label="Final_Score")
+    ax.set_xlabel("Probability (Prob)")
+    ax.set_ylabel("AD_Score")
+    ax.set_title("AD-Aware Scoring Landscape")
+    _save(fig, "fig2_prob_vs_ad", fig_dir)
+
+    # C. Ranking Behavior
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(df.index, df["Final_Score"], lw=2, color='black')
+    ax.set_xlabel("Rank")
+    ax.set_ylabel("Final_Score")
+    ax.set_title("Screening Ranking Curve")
+    _save(fig, "fig3_ranking_curve", fig_dir)
+
+    # D. AD Impact (Overlap Analysis)
+    top_n_list = [100, 500, 1000]
+    overlap_ratios = []
+    prob_ranked = df.sort_values("prob", ascending=False).index.tolist()
+    final_ranked = df.index.tolist()
+    
+    for n in top_n_list:
+        n = min(n, len(df))
+        overlap = len(set(prob_ranked[:n]) & set(final_ranked[:n]))
+        overlap_ratios.append(overlap / n)
+        print(f"Top-{n} Overlap (Prob vs Final): {overlap/n:.1%}")
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.bar([f"Top-{n}" for n in top_n_list], overlap_ratios, color="#3b528b")
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Overlap Ratio")
+    ax.set_title("Ranking Shift: Prob vs Final_Score")
+    _save(fig, "fig4_overlap", fig_dir)
+
+    # E. Top Candidate Bias
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, col in zip(axes, ["prob", "AD_Score"]):
+        sns.kdeplot(df[col], ax=ax, label="All", fill=True, alpha=0.3)
+        sns.kdeplot(top_df[col], ax=ax, label="Top Hits", fill=True, alpha=0.3)
+        ax.legend()
+        ax.set_title(f"Selection Bias: {col}")
+    _save(fig, "fig5_top_bias", fig_dir)
+
+    # F. Chemical Space (PCA)
+    features = [c for c in df.columns if c.startswith('morgan_') or c in ['AD_Score', 'prob']]
+    if len(features) > 10:
+        pca = PCA(n_components=2)
+        X_all = pca.fit_transform(df[features].fillna(0))
+        X_top = X_all[df.index.isin(top_df.index)]
+        
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(X_all[:,0], X_all[:,1], c='lightgray', s=5, alpha=0.3, label="Screened")
+        ax.scatter(X_top[:,0], X_top[:,1], c='#fde725', s=15, alpha=0.8, label="Top Hits", edgecolors='black', lw=0.5)
+        ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%})")
+        ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%})")
+        ax.legend()
+        _save(fig, "fig6_pca_space", fig_dir)
+
+    print(f"Success: All plots exported to {fig_dir}")
+# %%
