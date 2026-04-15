@@ -63,7 +63,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 import argparse
 import json
 import os
-import logging  # 确保全局可用
+import logging  # Keep logging available throughout the module
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -264,8 +264,8 @@ def load_ad_artifacts(ad_dir: Path, model_name: str, seed: int):
     artifacts = {}
 
     try:
-        # 1. 确保 ad_dir 指向的是最深层的文件夹 (seed_xxxxx)
-        # 如果传入的是上级目录，自动向下补全
+        # 1. Ensure ad_dir points to the deepest seed-specific folder.
+        # If a parent directory is provided, resolve it automatically.
         if (ad_dir / "validation").exists():
             ad_dir = ad_dir / "validation" / "applicability_domain" / model_name / f"seed_{seed}"
 
@@ -273,7 +273,7 @@ def load_ad_artifacts(ad_dir: Path, model_name: str, seed: int):
             logger.error(f"AD directory not found: {ad_dir}")
             return None
 
-        # 2. 加载权重配置 - 必须指向具体的 .json 文件
+        # 2. Load the AD weight configuration from the JSON file.
         config_file = ad_dir / "ad_weight_config.json"
         if config_file.exists():
             with open(config_file, 'r') as f:
@@ -282,7 +282,7 @@ def load_ad_artifacts(ad_dir: Path, model_name: str, seed: int):
         else:
             logger.warning(f"ad_weight_config.json missing at {ad_dir}")
 
-        # 3. 加载 PCA 和 Scaler
+        # 3. Load the PCA model and scaler.
         pca_file = ad_dir / "ad_pca_model.joblib"
         scaler_file = ad_dir / "ad_pca_scaler.joblib"
 
@@ -291,11 +291,11 @@ def load_ad_artifacts(ad_dir: Path, model_name: str, seed: int):
         if scaler_file.exists():
             artifacts['scaler'] = joblib.load(scaler_file)
 
-        # 4. 加载 NPZ 数据 (修正 Key 名)
+        # 4. Load the NPZ reference arrays using the expected keys.
         npz_file = ad_dir / "ad_plot_data.npz"
         if npz_file.exists():
             data = np.load(npz_file, allow_pickle=True)
-            # 对应你之前 print(data.files) 看到的结果
+            # Match the keys exposed by data.files in the NPZ bundle.
             if 'X_train_base_scaled' in data:
                 artifacts['train_fps'] = data['X_train_base_scaled']
             if 'desc_train_scaled' in data:
@@ -524,7 +524,7 @@ def select_required_input_columns(parquet_schema_names: List[str], plan: Feature
     logger.info(f"Input parquet contains {len(available_columns)} columns.")
     logger.info(f"Sample columns from input: {available_columns[:10]}...")
 
-    # 1. è‡ªåŠ¨è¯†åˆ« ID åˆ—
+    # 1. Auto-detect the identifier column.
     id_col = None
     possible_id_names = ["zinc_id", "id", "ZINC_ID", "compound_id"]
     for name in possible_id_names:
@@ -538,14 +538,14 @@ def select_required_input_columns(parquet_schema_names: List[str], plan: Feature
         logger.error(f"âŒ CRITICAL: No ID column found. Looked for: {possible_id_names}")
         raise KeyError(f"Input parquet must contain an ID column. Available: {available_columns[:20]}")
 
-    # 2. æ£€æŸ¥ SMILES
+    # 2. Check that the SMILES column is available.
     if "smiles" not in names_set:
         logger.error("âŒ CRITICAL: 'smiles' column missing!")
         raise KeyError("Input parquet must contain a 'smiles' column for AD/Inference.")
 
     required_cols_set = {id_col, "smiles"}
 
-    # 3. éªŒè¯æŒ‡çº¹ (Fingerprints)
+    # 3. Validate fingerprint columns.
     missing_fps = []
     for col in plan.fp_input_columns:
         if col not in names_set:
@@ -560,7 +560,7 @@ def select_required_input_columns(parquet_schema_names: List[str], plan: Feature
     else:
         logger.info(f"âœ… All {len(plan.fp_input_columns)} fingerprint columns present.")
 
-    # 4. validate Descriptors
+    # 4. Validate descriptor columns.
     missing_descs = []
     for feat in plan.descriptor_names:
         if feat not in names_set:
@@ -720,49 +720,49 @@ def load_threshold_auto(
     return threshold
 
 def compute_batch_ad(full_raw_features: np.ndarray, ad_artifacts: Dict) -> Dict[str, np.ndarray]:
-    # 1. 提取零件
+    # 1. Extract the AD components.
     pca = ad_artifacts.get('pca')
     ad_scaler = ad_artifacts.get('scaler')
-    t_fps_full = ad_artifacts.get('train_fps')  # 训练集全特征 (例如: 419, 149)
-    t_desc = ad_artifacts.get('train_desc')     # 训练集描述符 (例如: 419, 20)
+    t_fps_full = ad_artifacts.get('train_fps')  # Full training feature matrix, e.g. (419, 149)
+    t_desc = ad_artifacts.get('train_desc')     # Training descriptor block, e.g. (419, 20)
     weights = ad_artifacts.get('weights', {})
 
     n_samples = len(full_raw_features)
 
-    # 【核心改进】：动态获取指纹维度
-    # 逻辑：总特征数 (149) - 描述符特征数 (20) = 指纹特征数 (129)
+    # Infer fingerprint dimensionality dynamically.
+    # Example: total features (149) - descriptor features (20) = 129 fingerprint features.
     if t_fps_full is not None and t_desc is not None:
         n_fp = t_fps_full.shape[1] - t_desc.shape[1]
     else:
-        # 如果万一没有训练集参考，回退到 plan 里的定义（如果能传入 plan 的话）
-        # 或者从 full_raw_features 减去 20 (假设描述符固定是 20)
+        # If training references are unavailable, fall back to a simple heuristic
+        # that assumes a fixed 20-descriptor block.
         n_fp = full_raw_features.shape[1] - 20 
 
-    # 2. 计算 Leverage
+    # 2. Compute the leverage proxy.
     lev = np.zeros(n_samples, dtype=np.float32)
     if pca and ad_scaler:
         lev = _compute_leverage_pca(pca, ad_scaler, full_raw_features)
 
-    # 3. 计算缩放后的特征 (用于相似度)
+    # 3. Scale features for similarity calculations.
     full_scaled = ad_scaler.transform(full_raw_features) if ad_scaler else full_raw_features
     
-    # 动态切分：前 n_fp 列是指纹，之后是描述符
+    # Split dynamically: the first n_fp columns are fingerprints, followed by descriptors.
     current_batch_fps = full_raw_features[:, :n_fp]
     current_batch_desc_scaled = full_scaled[:, n_fp:]
 
-    # 4. 计算相似度
+    # 4. Compute similarity terms.
     max_tanimoto = np.zeros(n_samples, dtype=np.float32)
     if t_fps_full is not None:
-        # 训练集也同样切分出指纹部分
+        # Slice the training matrix the same way to recover fingerprint columns.
         train_fps_only = t_fps_full[:, :n_fp]
         max_tanimoto = _compute_tanimoto_similarity(train_fps_only, current_batch_fps)
 
     max_cosine = np.zeros(n_samples, dtype=np.float32)
     if t_desc is not None:
-        # t_desc 在加载时通常已经是缩放后的描述符部分了
+        # The loaded training descriptor block is typically already scaled.
         max_cosine = _compute_cosine_similarity(t_desc, current_batch_desc_scaled)
 
-    # 5. 融合得分
+    # 5. Fuse the AD components into a final score.
     ad_final = _compute_ad_score(lev, max_tanimoto, max_cosine, weights)
 
     return {
@@ -783,7 +783,7 @@ def predict_batch(
     ad_artifacts: Optional[Dict] = None,
 ) -> Tuple["pd.DataFrame", Dict[str, int]]:
 
-    # 1. 预检查与过滤
+    # 1. Perform basic input checks and filtering.
     n_in = len(df)
     if n_in == 0:
         return pd.DataFrame(), {"processed": 0, "predicted": 0, "skipped": 0}
@@ -796,11 +796,11 @@ def predict_batch(
 
     dfv = df.loc[valid_mask].copy()
     
-    # 2. 特征构建
+    # 2. Build fingerprint and descriptor matrices.
     fp_final, desc_final = build_feature_matrices(dfv, plan)
     nan_rows = np.isnan(desc_final).any(axis=1)
     
-    # SMILES 验证
+    # Optional SMILES validation.
     ok_smiles = np.ones((len(dfv),), dtype=bool)
     if smiles_validation == "rdkit":
         try:
@@ -819,22 +819,22 @@ def predict_batch(
     zid_calc = zinc_id.loc[valid_mask].to_numpy()[final_ok]
     smi_calc = smiles.loc[valid_mask].to_numpy()[final_ok]
 
-    # 3. QSAR 模型推理
+    # 3. Run QSAR model inference.
     X = apply_scaling_if_needed(fp_calc, desc_calc, scaler=scaler, model_name=model_name)
     proba = model.predict_proba(X)[:, 1].astype(np.float32)
 
-    # 4. AD 计算 (核心修正)
+    # 4. Compute AD scores when AD artifacts are available.
     ad_score, lev, tanimoto, cosine = np.ones_like(proba), np.zeros_like(proba), np.zeros_like(proba), np.zeros_like(proba)
 
     if ad_artifacts:
         try:
-            # 准备 AD 计算需要的 149 维原始特征 (FP + Desc)
+            # Build the raw feature matrix required by the AD routine (FP + descriptors).
             full_raw_features = np.concatenate([
                 fp_calc.astype(np.float32), 
                 desc_calc.astype(np.float32)
             ], axis=1)
 
-            # 调用计算引擎
+            # Call the AD scoring helper.
             ad_out = compute_batch_ad(
                 full_raw_features=full_raw_features,
                 ad_artifacts=ad_artifacts
@@ -847,7 +847,7 @@ def predict_batch(
             import logging
             logging.getLogger(__name__).error(f"AD inner error: {e}")
 
-    # 5. 组装结果
+    # 5. Assemble the output table.
     out = pd.DataFrame({
         "zinc_id": zid_calc.astype(np.int64),
         "smiles": smi_calc,
@@ -947,7 +947,7 @@ def stream_inference(
                 model_name=model_name,
                 threshold=threshold,
                 smiles_validation=smiles_validation,
-                ad_artifacts=ad_artifacts  # 传递整个字典
+                ad_artifacts=ad_artifacts  # Pass the full AD artifact bundle.
             )
         except Exception as exc:
             logger.error(f"[Batch {batch_idx}] ERROR during prediction/AD: {exc}")
@@ -995,12 +995,12 @@ def sanity_check_first_batch(
     
     df = first.to_pandas()
     
-    # éªŒè¯ ID åˆ—æ˜¯å¦å­˜åœ¨
+    # Verify that an ID column is present.
     id_present = any(name in df.columns for name in ['zinc_id', 'id', 'ZINC_ID', 'compound_id'])
     if not id_present:
         raise ValueError(f"Missing ID column. Available: {df.columns.tolist()}")
 
-    # éªŒè¯ç‰¹å¾çŸ©é˜µ
+    # Verify feature matrix dimensions.
     fp_u8, desc_f32 = build_feature_matrices(df, plan)
     
     logger.info("--- Pre-flight Sanity Check ---")
