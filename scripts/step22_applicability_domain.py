@@ -224,7 +224,7 @@ class ADConfig:
     Higher k values suppress predictions with low applicability domain scores.
     """
 
-    # 🆕 Calibration integration configuration
+    #  Calibration integration configuration
     logit_shrinkage_method: str = "auto"
     """
     Apply AD shrinkage strategy:

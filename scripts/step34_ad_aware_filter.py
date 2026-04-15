@@ -418,7 +418,7 @@ def _in_ipython():
 
 if _in_ipython():
     # --- USER EDITABLE ---
-    OUT_DIR = Path("../models_out/qsar_ml_20260412_162829/virtual_screening/ad_screening_results_20260415_105720")
+    OUT_DIR = Path("../models_out/qsar_ml_20260412_162829/virtual_screening/ad_screening_results_20260415_113643")
     # ---------------------
 
     PLOT_STYLE = {
