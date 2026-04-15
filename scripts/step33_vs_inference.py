@@ -44,7 +44,7 @@ python scripts/step33_vs_inference.py \
   --calibration isotonic \
   --threshold auto \
   --threshold_metric mcc \
-  --input ./data/database/zinc_test_5k_features.parquet \
+  --input ./data/database/zinc_features.parquet \
   --ad_integration
 
   # threshold optional: f1(default currently), youden, mcc, recall, precision, or specific value

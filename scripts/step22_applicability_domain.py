@@ -2200,8 +2200,20 @@ if _in_ipython():
     print(f"[INFO] Saving figures to: {OUT_DIR}")
 
     # ── 1. Williams-style plot: Leverage vs Residual ───────────────────
-    fig, ax = plt.subplots(figsize=(4.4, 3.2), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(4.8, 3.6), constrained_layout=True)
 
+    # Calculate Williams threshold: h* = 3(p + 1) / n
+    # Estimate p (number of features) from leverage statistics
+    if len(leverage) > 0:
+        # Use mean leverage to estimate p: mean(h) = (p+1)/n
+        mean_leverage = np.mean(leverage)
+        n_samples = len(leverage)
+        p_estimated = max(1, int(mean_leverage * n_samples - 1))
+        h_star = 3 * (p_estimated + 1) / n_samples
+    else:
+        h_star = 0.1  # fallback
+
+    # Plot data points
     ax.scatter(
         leverage[in_domain], std_resid[in_domain],
         s=20, alpha=0.55, color=_C_IN, edgecolors="none", label="In-domain",
@@ -2212,12 +2224,32 @@ if _in_ipython():
         linewidths=0.4, label="Out-of-domain",
     )
 
+    # Add Williams threshold lines
+    ax.axvline(x=h_star, color='red', linestyle='--', linewidth=1.5, 
+               alpha=0.8, label=f"h* = {h_star:.3f}")
+    ax.axhline(y=2, color='purple', linestyle='--', linewidth=1.2, 
+               alpha=0.7, label="±2σ (95%)")
+    ax.axhline(y=-2, color='purple', linestyle='--', linewidth=1.2, alpha=0.7)
+    ax.axhline(y=3, color='darkred', linestyle=':', linewidth=1.0, 
+               alpha=0.6, label="±3σ (99%)")
+    ax.axhline(y=-3, color='darkred', linestyle=':', linewidth=1.0, alpha=0.6)
+
     ax.set_xlabel("Leverage ($h$)")
     ax.set_ylabel("Std. deviance residual")
-    ax.set_title("AD Diagnostic: Leverage vs Residual")
+    ax.set_title("Williams Plot: Leverage vs Residual")
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
+    ax.set_ylim(-4, 4)  # Symmetric Y-axis for better bias detection
     _style_axis(ax)
-    ax.legend(**_LEGEND_KW)
+    
+    # Move legend outside if needed
+    legend_kw = _LEGEND_KW.copy()
+    if len(leverage) > 50:  # Many points, move legend outside
+        legend_kw.update({
+            "loc": "upper left",
+            "bbox_to_anchor": (1.02, 1),
+            "borderaxespad": 0.
+        })
+    ax.legend(**legend_kw)
 
     plt.show()
     _save(fig, OUT_DIR / "ad_vs_residual")
@@ -2394,5 +2426,143 @@ if _in_ipython():
         print("[INFO] Calibration files not found (skipped advanced plots)")
 
     print("[OK] All AD visualizations complete.")
+
+# %%
+# Advanced Analysis: Error Distribution & Activity Cliff Detection
+##############################################################################
+# Additional visualizations for deeper AD analysis
+# - A. Error distribution comparison (in-domain vs out-of-domain)
+# - B. Activity cliff detection in Williams plot
+##############################################################################
+
+if _in_ipython():
+    
+    from scipy.stats import gaussian_kde
+    import seaborn as sns
+    
+    print("[INFO] Generating advanced analysis plots...")
+    
+    # ── A. Error Distribution Comparison ────────────────────────────────
+    if error is not None:
+        fig, ax = plt.subplots(figsize=(5.0, 3.6), constrained_layout=True)
+        
+        # Separate errors by domain
+        error_in = error[in_domain]
+        error_out = error[~in_domain]
+        
+        # Create KDE plots
+        if len(error_in) > 1:
+            kde_in = gaussian_kde(error_in)
+            x_in = np.linspace(error_in.min(), error_in.max(), 100)
+            ax.plot(x_in, kde_in(x_in), color=_C_IN, linewidth=2, 
+                   label="In-domain", alpha=0.8)
+            ax.fill_between(x_in, kde_in(x_in), alpha=0.3, color=_C_IN)
+        
+        if len(error_out) > 1:
+            kde_out = gaussian_kde(error_out)
+            x_out = np.linspace(error_out.min(), error_out.max(), 100)
+            ax.plot(x_out, kde_out(x_out), color=_C_OUT, linewidth=2, 
+                   label="Out-of-domain", alpha=0.8)
+            ax.fill_between(x_out, kde_out(x_out), alpha=0.3, color=_C_OUT)
+        
+        # Add vertical lines for means
+        if len(error_in) > 0:
+            ax.axvline(error_in.mean(), color=_C_IN, linestyle='--', 
+                      alpha=0.7, linewidth=1)
+        if len(error_out) > 0:
+            ax.axvline(error_out.mean(), color=_C_OUT, linestyle='--', 
+                      alpha=0.7, linewidth=1)
+        
+        ax.set_xlabel("Prediction Error")
+        ax.set_ylabel("Density")
+        ax.set_title("Error Distribution: In-Domain vs Out-of-Domain")
+        _style_axis(ax)
+        ax.legend(**_LEGEND_KW)
+        
+        plt.show()
+        _save(fig, OUT_DIR / "error_distribution_comparison")
+        print("[EXPORT] error_distribution_comparison")
+    
+    # ── B. Activity Cliff Detection ─────────────────────────────────────
+    # Identify compounds with high similarity but poor prediction
+    if len(leverage) > 0 and error is not None:
+        fig, ax = plt.subplots(figsize=(5.2, 3.8), constrained_layout=True)
+        
+        # Calculate activity cliff criteria
+        # Activity cliffs: h < h* (structurally similar) AND |residual| > 2 (poor prediction)
+        activity_cliff_mask = (leverage < h_star) & (np.abs(std_resid) > 2)
+        
+        # Plot all points
+        ax.scatter(
+            leverage[in_domain & ~activity_cliff_mask], 
+            std_resid[in_domain & ~activity_cliff_mask],
+            s=18, alpha=0.4, color=_C_IN, edgecolors="none", label="In-domain",
+        )
+        ax.scatter(
+            leverage[~in_domain & ~activity_cliff_mask], 
+            std_resid[~in_domain & ~activity_cliff_mask],
+            s=22, alpha=0.6, color=_C_OUT, marker="D", edgecolors="white",
+            linewidths=0.4, label="Out-of-domain",
+        )
+        
+        # Highlight activity cliffs
+        if np.sum(activity_cliff_mask) > 0:
+            ax.scatter(
+                leverage[activity_cliff_mask], std_resid[activity_cliff_mask],
+                s=60, alpha=0.9, color='red', marker='*', edgecolors='darkred',
+                linewidths=1.0, label="Activity Cliff", zorder=10
+            )
+            
+            # Annotate activity cliffs with their indices
+            cliff_indices = np.where(activity_cliff_mask)[0]
+            for idx in cliff_indices[:10]:  # Limit annotations to first 10
+                ax.annotate(f"{idx}", 
+                           xy=(leverage[idx], std_resid[idx]),
+                           xytext=(5, 5), textcoords='offset points',
+                           fontsize=7, alpha=0.8, color='darkred')
+        
+        # Add threshold lines
+        ax.axvline(x=h_star, color='red', linestyle='--', linewidth=1.5, 
+                   alpha=0.8, label=f"h* = {h_star:.3f}")
+        ax.axhline(y=2, color='purple', linestyle='--', linewidth=1.2, alpha=0.7)
+        ax.axhline(y=-2, color='purple', linestyle='--', linewidth=1.2, alpha=0.7)
+        
+        # Highlight activity cliff region
+        ax.axvspan(0, h_star, ymin=0.5, ymax=0.75, alpha=0.1, color='red',
+                  label="Cliff Region")
+        ax.axvspan(0, h_star, ymin=0.25, ymax=0.5, alpha=0.1, color='red')
+        
+        ax.set_xlabel("Leverage ($h$)")
+        ax.set_ylabel("Std. deviance residual")
+        ax.set_title(f"Activity Cliff Detection (n={np.sum(activity_cliff_mask)} cliffs)")
+        ax.set_ylim(-4, 4)
+        _style_axis(ax)
+        
+        # Legend with cliff statistics
+        legend_text = f"Cliffs: {np.sum(activity_cliff_mask)}"
+        ax.legend(title=legend_text, **{
+            "loc": "upper left",
+            "bbox_to_anchor": (1.02, 1),
+            "borderaxespad": 0.,
+            "frameon": True,
+            "fancybox": True,
+            "edgecolor": "0.70",
+            "framealpha": 0.90,
+            "fontsize": 9,
+        })
+        
+        plt.show()
+        _save(fig, OUT_DIR / "activity_cliff_detection")
+        
+        # Print cliff statistics
+        print(f"[ACTIVITY CLIFFS] Found {np.sum(activity_cliff_mask)} potential activity cliffs")
+        if np.sum(activity_cliff_mask) > 0:
+            cliff_indices = np.where(activity_cliff_mask)[0]
+            print(f"  - Cliff indices: {cliff_indices[:10]}{'...' if len(cliff_indices) > 10 else ''}")
+            print(f"  - Mean leverage: {leverage[activity_cliff_mask].mean():.3f}")
+            print(f"  - Mean |residual|: {np.abs(std_resid[activity_cliff_mask]).mean():.3f}")
+        print("[EXPORT] activity_cliff_detection")
+    
+    print("[OK] Advanced analysis complete.")
 
 # %%
