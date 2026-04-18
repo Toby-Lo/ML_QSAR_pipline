@@ -70,6 +70,61 @@ def setup_logging(output_dir: Path) -> logging.Logger:
     return logger
 
 
+def _normalize_id_as_string(s: pd.Series, logger: Optional[logging.Logger] = None) -> pd.Series:
+    """
+    Normalize an ID-like column to a pandas string dtype without losing formatting.
+
+    Notes:
+    - If upstream already converted IDs to float (e.g. via CSV/Excel), leading zeros/prefixes
+      are already unrecoverable. Here we at least:
+        1) prevent scientific notation in outputs
+        2) strip trailing '.0' introduced by float-to-string casts for integer-valued floats
+        3) keep everything as UTF-8 string for downstream joins/tracking
+    """
+    if s is None:
+        return s
+
+    # Fast path: already string-like
+    if pd.api.types.is_string_dtype(s.dtype) or s.dtype == object:
+        out = s.astype("string")
+        # common float-artifact: "12345.0"
+        out = out.str.replace(r"\.0$", "", regex=True)
+        return out
+
+    # Integers -> string
+    if pd.api.types.is_integer_dtype(s.dtype):
+        return s.astype("string")
+
+    # Floats -> best effort: if all non-null values are integer-valued, cast via Int64 first.
+    if pd.api.types.is_float_dtype(s.dtype):
+        vals = s.to_numpy(copy=False)
+        finite = np.isfinite(vals)
+        nonnull = finite & ~pd.isna(vals)
+        if nonnull.any():
+            frac = np.abs(vals[nonnull] - np.round(vals[nonnull]))
+            is_int_like = np.all(frac < 1e-9)
+        else:
+            is_int_like = True
+
+        if not is_int_like and logger is not None:
+            logger.warning(
+                "zinc_id appears to be float with non-integer values; converting to string may preserve decimals. "
+                "If these IDs were supposed to be strings (e.g., ZINC000...), please re-run upstream steps with zinc_id as string."
+            )
+
+        if is_int_like:
+            # Round to nearest integer then cast; keeps full digits and avoids scientific notation.
+            out = pd.Series(np.round(vals), index=s.index, name=s.name).astype("Int64").astype("string")
+            return out
+
+        out = s.astype("string")
+        out = out.str.replace(r"\.0$", "", regex=True)
+        return out
+
+    # Fallback for other dtypes
+    return s.astype("string")
+
+
 def load_merged_data(input_file: Path, logger: logging.Logger) -> pd.DataFrame:
     """
     Load merged predictions and AD scores from a single parquet file.
@@ -100,7 +155,25 @@ def load_merged_data(input_file: Path, logger: logging.Logger) -> pd.DataFrame:
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns in input file: {missing_cols}")
-    
+
+    # Normalize zinc_id to string to prevent precision/format issues downstream.
+    # (Upstream scripts should already do this, but step34 is a safety net.)
+    before_dtype = str(df["zinc_id"].dtype)
+    df["zinc_id"] = _normalize_id_as_string(df["zinc_id"], logger=logger)
+    after_dtype = str(df["zinc_id"].dtype)
+    if before_dtype != after_dtype:
+        logger.info(f"Normalized zinc_id dtype: {before_dtype} -> {after_dtype}")
+
+    # Ensure smiles remains available for traceability if present upstream.
+    if "smiles" not in df.columns:
+        logger.warning(
+            "Input parquet does not contain a 'smiles' column. "
+            "Step34 will preserve it if present, but cannot reconstruct it. "
+            "If you need smiles in outputs, re-run step33 with the updated script that keeps smiles."
+        )
+    else:
+        df["smiles"] = df["smiles"].astype("string")
+
     # Validate data types and ranges
     prob_min, prob_max = df["prob"].min(), df["prob"].max()
     if prob_min < 0 or prob_max > 1:
@@ -201,14 +274,14 @@ def rank_and_select_candidates(df: pd.DataFrame, top_n: Optional[int],
     
     # Select top candidates
     if top_n is not None:
-        top_candidates = ranked_df.head(top_n)
+        top_candidates = ranked_df.head(top_n).copy()
         logger.info(f"Selected top {top_n} candidates")
     elif top_percent is not None:
         n_candidates = max(1, int(len(ranked_df) * top_percent))
-        top_candidates = ranked_df.head(n_candidates)
+        top_candidates = ranked_df.head(n_candidates).copy()
         logger.info(f"Selected top {top_percent:.1%} ({n_candidates:,}) candidates")
     else:
-        top_candidates = ranked_df
+        top_candidates = ranked_df.copy()
         logger.info("No selection criteria specified, returning all candidates")
     
     return ranked_df, top_candidates
@@ -267,7 +340,21 @@ def save_outputs(ranked_df: pd.DataFrame, top_candidates: pd.DataFrame,
     logger.info(f"Saving outputs to: {output_dir}")
     
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Avoid pandas chained-assignment warnings for slices/views.
+    ranked_df = ranked_df.copy()
+    top_candidates = top_candidates.copy()
     
+    # Safety: enforce stable dtypes on outputs.
+    if "zinc_id" in ranked_df.columns:
+        ranked_df.loc[:, "zinc_id"] = _normalize_id_as_string(ranked_df["zinc_id"], logger=logger)
+    if "zinc_id" in top_candidates.columns:
+        top_candidates.loc[:, "zinc_id"] = _normalize_id_as_string(top_candidates["zinc_id"], logger=logger)
+    if "smiles" in ranked_df.columns:
+        ranked_df.loc[:, "smiles"] = ranked_df["smiles"].astype("string")
+    if "smiles" in top_candidates.columns:
+        top_candidates.loc[:, "smiles"] = top_candidates["smiles"].astype("string")
+
     # Save ranked results
     ranked_path = output_dir / "ranked_results.parquet"
     ranked_df.to_parquet(ranked_path, index=False)
@@ -404,19 +491,19 @@ if __name__ == "__main__":
 #   - Export publication-ready figures (PNG + SVG)
 ##############################################################################
 
-import os, json, sys
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.decomposition import PCA
-
 def _in_ipython():
     try: return __IPYTHON__ is not None
     except NameError: return False
 
 if _in_ipython():
+    import os, json, sys
+    from pathlib import Path
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.decomposition import PCA
+
     # --- USER EDITABLE ---
     OUT_DIR = Path("../models_out/qsar_ml_20260412_162829/virtual_screening/ad_screening_results_20260415_113643")
     # ---------------------

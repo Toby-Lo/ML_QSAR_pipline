@@ -104,7 +104,8 @@ def stage2_pipeline(
         if len(chunk) == 0:
             continue
 
-        chunk["zinc_id"] = chunk["zinc_id"].astype("int64")
+        # Keep zinc_id as UTF-8 string to avoid precision loss (e.g., long IDs).
+        chunk["zinc_id"] = chunk["zinc_id"].astype("string")
         chunk["smiles"] = chunk["smiles"].astype("string")
 
         table = pa.Table.from_pandas(chunk, preserve_index=False)

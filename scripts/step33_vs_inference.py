@@ -927,9 +927,10 @@ def predict_batch(
     if n_in == 0:
         return pd.DataFrame(), {"processed": 0, "predicted": 0, "skipped": 0}
 
-    zinc_id = pd.to_numeric(df["zinc_id"], errors="coerce")
+    # Keep zinc_id as UTF-8 string to avoid precision loss (e.g., long IDs).
+    zinc_id = df["zinc_id"].astype("string")
     smiles = _normalize_smiles_series(df["smiles"])
-    valid_mask = zinc_id.notna() & smiles.notna() & (smiles.str.len() > 0)
+    valid_mask = zinc_id.notna() & (zinc_id.str.len() > 0) & smiles.notna() & (smiles.str.len() > 0)
     if valid_mask.sum() == 0:
         return pd.DataFrame(), {"processed": n_in, "predicted": 0, "skipped": n_in}
 
@@ -955,7 +956,7 @@ def predict_batch(
 
     fp_calc = fp_final[final_ok]
     desc_calc = desc_final[final_ok]
-    zid_calc = zinc_id.loc[valid_mask].to_numpy()[final_ok]
+    zid_calc = zinc_id.loc[valid_mask].to_numpy(dtype="object", copy=False)[final_ok]
     smi_calc = smiles.loc[valid_mask].to_numpy()[final_ok]
 
     # 3. Run QSAR model inference.
@@ -989,7 +990,7 @@ def predict_batch(
 
     # 5. Assemble the output table.
     out = pd.DataFrame({
-        "zinc_id": zid_calc.astype(np.int64),
+        "zinc_id": zid_calc,
         "smiles": smi_calc,
         "prob": proba,
         "pred_label": (proba >= threshold).astype(np.int8),
@@ -1046,7 +1047,7 @@ def stream_inference(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     out_schema = pa.schema([
-        pa.field("zinc_id", pa.int64()),
+        pa.field("zinc_id", pa.string()),
         pa.field("smiles", pa.string()),
         pa.field("prob", pa.float32()),
         pa.field("pred_label", pa.int8()),
@@ -1073,7 +1074,7 @@ def stream_inference(
         try:
             df = batch.to_pandas()
             df = df.rename(columns={id_col: "zinc_id"})
-            df["zinc_id"] = df["zinc_id"].astype("int64")
+            df["zinc_id"] = df["zinc_id"].astype("string")
         except Exception as exc:
             logger.error(f"[Batch {batch_idx}] ERROR preparing batch: {exc}")
             continue

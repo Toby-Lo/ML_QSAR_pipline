@@ -104,7 +104,8 @@ def vs_filter_pipeline(
             continue
 
         # Type enforcement
-        chunk["zinc_id"] = chunk["zinc_id"].astype("int64")
+        # Keep zinc_id as UTF-8 string to avoid precision loss (e.g., long IDs).
+        chunk["zinc_id"] = chunk["zinc_id"].astype("string")
         chunk["smiles"] = chunk["smiles"].astype("string")
 
         # Write parquet stream

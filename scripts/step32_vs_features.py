@@ -167,7 +167,7 @@ def stage3_pipeline(
 
         chunk = batch.to_pandas()
 
-        zinc_ids: List[int] = []
+        zinc_ids: List[str] = []
         smiles_out: List[str] = []
         fp_rows: List[np.ndarray] = []
         desc_rows: List[np.ndarray] = []
@@ -177,6 +177,8 @@ def stage3_pipeline(
             zinc_id = getattr(row, "zinc_id")
             if not isinstance(smiles, str) or not smiles:
                 continue
+            if zinc_id is None:
+                continue
 
             result = featurize(smiles, fp_generator, descriptor_funcs, descriptor_names)
             if result is None:
@@ -184,10 +186,8 @@ def stage3_pipeline(
 
             fp, desc = result
 
-            try:
-                zinc_ids.append(int(zinc_id))
-            except Exception:
-                continue
+            # Keep zinc_id as UTF-8 string to avoid precision loss / rounding for long IDs.
+            zinc_ids.append(str(zinc_id))
             smiles_out.append(smiles)
             fp_rows.append(fp)
             desc_rows.append(desc)
@@ -209,7 +209,7 @@ def stage3_pipeline(
 
         df_out = pd.concat([df_out, df_fp, df_desc, df_desc_isna], axis=1)
 
-        df_out["zinc_id"] = df_out["zinc_id"].astype("int64")
+        df_out["zinc_id"] = df_out["zinc_id"].astype("string")
         df_out["smiles"] = df_out["smiles"].astype("string")
 
         table = pa.Table.from_pandas(df_out, preserve_index=False)
