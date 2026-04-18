@@ -38,7 +38,7 @@ I/O + performance
 - Memory-stable processing using Polars and batching
 
 python scripts/step33_vs_inference.py \
-  --model_dir ./models_out/qsar_ml_20260412_162829 \
+  --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
   --model_name SVC \
   --seed 12345 \
   --calibration isotonic \
@@ -47,7 +47,55 @@ python scripts/step33_vs_inference.py \
   --input ./data/database/zinc_features.parquet \
   --ad_integration
 
-  # threshold optional: f1(default currently), youden, mcc, recall, precision, or specific value
+  # threshold optional: f1(default currently), youden, mcc, recall, precision, or specific value\
+
+[Original liagnd (A1A0M) validation]
+python scripts/step33_vs_inference.py \
+  --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
+  --model_name SVC \
+  --seed 12345 \
+  --calibration isotonic \
+  --threshold auto \
+  --threshold_metric mcc \
+  --input ./docking/9CVD/a1a0m_final.parquet \
+  --output ./docking/9CVD/a1a0m_final_inference_result.parquet \
+  --ad_integration
+
+python scripts/step33_vs_inference.py \
+  --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
+  --model_name SVC \
+  --seed 12345 \
+  --calibration sigmoid \
+  --threshold auto \
+  --threshold_metric mcc \
+  --input ./models_out/qsar_ml_20260412_162829/original_ligand_QSAR/A1A0M_feature.parquet \
+  --output ./models_out/qsar_ml_20260412_162829/original_ligand_QSAR/A1A0M_inference_result_sigmoid.parquet \
+  --ad_integration
+
+[Inference for NSD2 development set]
+python scripts/step33_vs_inference.py \
+  --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
+  --model_name SVC \
+  --seed 12345 \
+  --calibration isotonic \
+  --threshold auto \
+  --threshold_metric mcc \
+  --input ./data/NSD2/nsd2_dev_set_seed12345.parquet \
+  --output ./data/NSD2/dev_set_validation_result.parquet \
+  --ad_integration
+
+[Inference for NSD2 External test set]
+python scripts/step33_vs_inference.py \
+  --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
+  --model_name SVC \
+  --seed 12345 \
+  --calibration isotonic \
+  --threshold auto \
+  --threshold_metric mcc \
+  --input ./data/NSD2/nsd2_test_set_seed12345.parquet \
+  --output ./data/NSD2/test_set_inference_result.parquet \
+  --ad_integration
+
 """
 
 from __future__ import annotations
@@ -250,60 +298,137 @@ def build_artifact_paths(model_dir: Path, model_name: str, seed: int, calibratio
     )
 
 
-def load_ad_artifacts(ad_dir: Path, model_name: str, seed: int):
-    """
-  
-    """
-    import numpy as np
-    import joblib
-    import json
+def _resolve_ad_seed_dir(ad_root: Path, model_name: str, seed: int) -> Path:
+    candidates = [
+        ad_root / "validation" / "applicability_domain" / model_name / f"seed_{seed}",
+        ad_root / model_name / f"seed_{seed}",
+        ad_root / f"seed_{seed}",
+        ad_root,
+    ]
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "ad_pca_model.joblib").exists():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not resolve AD artifact directory from {ad_root}. "
+        f"Expected a folder containing ad_pca_model.joblib for model={model_name}, seed={seed}."
+    )
+
+
+def _find_split_dir_from_ad_dir(ad_dir: Path) -> Path:
+    for candidate in [ad_dir, *ad_dir.parents]:
+        if candidate.name.startswith("split_seed_"):
+            return candidate
+    raise FileNotFoundError(f"Could not locate split_seed_* ancestor for AD directory: {ad_dir}")
+
+
+def load_ad_artifacts(ad_root: Path, model_name: str, seed: int, plan: FeaturePlan):
     import logging
-    from pathlib import Path
 
     logger = logging.getLogger(__name__)
-    artifacts = {}
+    artifacts: Dict[str, Any] = {}
 
     try:
-        # 1. Ensure ad_dir points to the deepest seed-specific folder.
-        # If a parent directory is provided, resolve it automatically.
-        if (ad_dir / "validation").exists():
-            ad_dir = ad_dir / "validation" / "applicability_domain" / model_name / f"seed_{seed}"
+        ad_dir = _resolve_ad_seed_dir(Path(ad_root), model_name=model_name, seed=seed)
+        split_dir = _find_split_dir_from_ad_dir(ad_dir)
 
-        if not ad_dir.exists():
-            logger.error(f"AD directory not found: {ad_dir}")
-            return None
-
-        # 2. Load the AD weight configuration from the JSON file.
         config_file = ad_dir / "ad_weight_config.json"
         if config_file.exists():
-            with open(config_file, 'r') as f:
-                artifacts['weights'] = json.load(f)
-            logger.info(f"✅ Loaded AD weight config")
+            with open(config_file, "r", encoding="utf-8") as f:
+                artifacts["weights"] = json.load(f)
+            logger.info("Loaded AD weight config")
         else:
             logger.warning(f"ad_weight_config.json missing at {ad_dir}")
 
-        # 3. Load the PCA model and scaler.
+        summary_file = ad_dir / "ad_summary.json"
+        if summary_file.exists():
+            summary = _read_json(summary_file)
+            if isinstance(summary, dict):
+                artifacts["base_method"] = str(summary.get("base_method", "leverage")).strip().lower()
+                continuous = summary.get("continuous_ad_scores", {})
+                if isinstance(continuous, dict):
+                    artifacts["ad_score_power"] = float(continuous.get("ad_score_power", 2.0))
+
         pca_file = ad_dir / "ad_pca_model.joblib"
         scaler_file = ad_dir / "ad_pca_scaler.joblib"
-
         if pca_file.exists():
-            artifacts['pca'] = joblib.load(pca_file)
+            artifacts["pca"] = joblib.load(pca_file)
         if scaler_file.exists():
-            artifacts['scaler'] = joblib.load(scaler_file)
+            artifacts["scaler"] = joblib.load(scaler_file)
 
-        # 4. Load the NPZ reference arrays using the expected keys.
         npz_file = ad_dir / "ad_plot_data.npz"
         if npz_file.exists():
             data = np.load(npz_file, allow_pickle=True)
-            # Match the keys exposed by data.files in the NPZ bundle.
-            if 'X_train_base_scaled' in data:
-                artifacts['train_fps'] = data['X_train_base_scaled']
-            if 'desc_train_scaled' in data:
-                artifacts['train_desc'] = data['desc_train_scaled']
-            logger.info("✅ Loaded training reference data (NPZ)")
+            if "desc_train_scaled" in data:
+                artifacts["train_desc_scaled"] = np.asarray(data["desc_train_scaled"], dtype=np.float32)
+            logger.info("Loaded AD plot reference arrays")
 
-    except Exception as e:
-        logger.error(f"❌ Critical error loading AD artifacts: {str(e)}")
+        train_npz = split_dir / "data" / "splits" / "dev_train.npz"
+        if not train_npz.exists():
+            raise FileNotFoundError(f"Missing dev_train.npz required for AD inference: {train_npz}")
+
+        train = np.load(train_npz, allow_pickle=True)
+        train_fp = np.asarray(train["fp"], dtype=np.float32)
+        train_desc = np.asarray(train["desc"], dtype=np.float32)
+
+        fp_mask_path = split_dir / "feature_processors" / "fp_mask.npy"
+        if fp_mask_path.exists():
+            fp_mask = np.load(fp_mask_path).astype(bool)
+            if fp_mask.ndim != 1 or fp_mask.shape[0] != train_fp.shape[1]:
+                raise ValueError(
+                    f"Unexpected fp_mask shape {fp_mask.shape}; expected ({train_fp.shape[1]},)"
+                )
+            train_fp = train_fp[:, fp_mask]
+        else:
+            if train_fp.shape[1] >= max(plan.fp_indices) + 1:
+                train_fp = train_fp[:, plan.fp_indices]
+            elif train_fp.shape[1] != plan.n_fp:
+                raise ValueError(
+                    f"Cannot align train fingerprints to plan. train_fp shape={train_fp.shape}, expected n_fp={plan.n_fp}"
+                )
+
+        if train_fp.shape[1] != plan.n_fp:
+            raise ValueError(f"AD train fingerprint dim mismatch: {train_fp.shape[1]} vs expected {plan.n_fp}")
+        if train_desc.shape[1] != plan.n_desc:
+            raise ValueError(f"AD train descriptor dim mismatch: {train_desc.shape[1]} vs expected {plan.n_desc}")
+
+        train_base_raw = np.concatenate([train_fp, train_desc], axis=1).astype(np.float32, copy=False)
+        if train_base_raw.shape[1] != plan.n_features_total:
+            raise ValueError(
+                f"AD train feature dim mismatch: {train_base_raw.shape[1]} vs expected {plan.n_features_total}"
+            )
+
+        artifacts["n_fp"] = int(plan.n_fp)
+        artifacts["n_desc"] = int(plan.n_desc)
+        artifacts["train_fp_bin"] = np.clip(np.round(train_fp).astype(np.int8), 0, 1)
+
+        if "train_desc_scaled" not in artifacts:
+            from sklearn.preprocessing import StandardScaler
+
+            desc_scaler = StandardScaler()
+            artifacts["train_desc_scaled"] = desc_scaler.fit_transform(train_desc).astype(np.float32)
+
+        pca = artifacts.get("pca")
+        ad_scaler = artifacts.get("scaler")
+        if pca is not None and ad_scaler is not None:
+            train_base_scaled = ad_scaler.transform(train_base_raw).astype(np.float32, copy=False)
+            train_base_pca = pca.transform(train_base_scaled)
+            xtx_inv = np.linalg.pinv(train_base_pca.T @ train_base_pca)
+            train_leverage = np.einsum("ij,jk,ik->i", train_base_pca, xtx_inv, train_base_pca)
+            finite_train_leverage = train_leverage[np.isfinite(train_leverage) & (train_leverage >= 0.0)]
+            if finite_train_leverage.size == 0:
+                raise ValueError("Failed to compute finite training leverage reference values.")
+            artifacts["train_pca_xtx_inv"] = xtx_inv
+            artifacts["density_reference_median"] = float(np.median(finite_train_leverage))
+
+        logger.info(
+            "AD artifacts ready: n_fp=%s n_desc=%s density_ref=%.6f",
+            artifacts.get("n_fp"),
+            artifacts.get("n_desc"),
+            float(artifacts.get("density_reference_median", np.nan)),
+        )
+
+    except Exception as exc:
+        logger.error(f"Critical error loading AD artifacts: {exc}")
         return None
 
     return artifacts
@@ -415,19 +540,19 @@ def _normalize_smiles_series(smiles_col) -> "pandas.Series":
     return s
 
 
-def _compute_leverage_pca(pca: Any, pca_scaler: Any, features: np.ndarray) -> np.ndarray:
-    """Compute leverage scores using pre-trained PCA."""
-    # Scale features using PCA scaler
+def _compute_leverage_pca(
+    pca: Any,
+    pca_scaler: Any,
+    features: np.ndarray,
+    train_pca_xtx_inv: Optional[np.ndarray],
+) -> np.ndarray:
+    """Compute PCA leverage with the same hat-matrix formula used in step22."""
+    if train_pca_xtx_inv is None:
+        raise ValueError("train_pca_xtx_inv is required for exact PCA leverage computation.")
+
     features_scaled = pca_scaler.transform(features)
-    
-    # Project to PCA space
     features_pca = pca.transform(features_scaled)
-    
-    # Compute leverage: h = diag(X(X^T X)^{-1} X^T)
-    # For PCA: h = diag(X_pca (X_pca^T X_pca)^{-1} X_pca^T)
-    # Since PCA components are orthonormal: h = diag(X_pca X_pca^T)
-    leverage = np.sum(features_pca ** 2, axis=1)
-    
+    leverage = np.einsum("ij,jk,ik->i", features_pca, train_pca_xtx_inv, features_pca)
     return leverage.astype(np.float32)
 
 
@@ -483,32 +608,44 @@ def _compute_cosine_similarity(train_features: np.ndarray, query_features: np.nd
     return max_similarities
 
 
-def _compute_ad_score(leverage: np.ndarray, max_tanimoto: np.ndarray, max_cosine: np.ndarray,
-                     ad_config: Dict[str, float]) -> np.ndarray:
-    """Compute final AD score using weighted combination and power law."""
-    # Extract weights from config
+def _compute_density_score_from_reference(
+    density_arr: np.ndarray,
+    reference_median: Optional[float],
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Normalize density-like values against a stable training reference."""
+    density_arr = np.asarray(density_arr, dtype=np.float64)
+    density_arr = np.where(
+        np.isnan(density_arr) | np.isinf(density_arr) | (density_arr < 0.0),
+        0.0,
+        density_arr,
+    )
+
+    d0 = float(reference_median) if reference_median is not None else float(np.median(density_arr))
+    d0 = max(d0, eps)
+    density_score = 1.0 / (1.0 + (density_arr / d0))
+    return np.clip(density_score, 0.0, 1.0).astype(np.float32)
+
+
+def _compute_ad_score(
+    density_score: np.ndarray,
+    max_tanimoto: np.ndarray,
+    max_cosine: np.ndarray,
+    ad_config: Dict[str, float],
+) -> np.ndarray:
+    """Compute final AD score using weighted similarity + density fusion."""
     w1 = ad_config.get("w1_tanimoto", 0.7)
     w2 = ad_config.get("w2_cosine", 0.3)
     w3 = ad_config.get("w3_similarity", 0.6)
     w4 = ad_config.get("w4_density", 0.4)
     power = ad_config.get("ad_score_power", 2.0)
-    
-    # Convert leverage to density-like score (higher leverage = lower density)
-    # Use inverse of normalized leverage as density proxy
-    leverage_norm = leverage / np.max(leverage) if np.max(leverage) > 0 else leverage
-    density_score = 1.0 - np.clip(leverage_norm, 0.0, 1.0)
-    
-    # Combine similarity scores
+
     similarity_score = w1 * max_tanimoto + w2 * max_cosine
     similarity_score = np.clip(similarity_score, 0.0, 1.0)
-    
-    # Combine similarity and density
+
     ad_raw = w3 * similarity_score + w4 * density_score
     ad_raw = np.clip(ad_raw, 0.0, 1.0)
-    
-    # Apply power law transformation
     ad_final = np.power(np.clip(ad_raw, 1e-7, 1.0), power)
-    
     return ad_final.astype(np.float32)
 
 
@@ -719,57 +856,59 @@ def load_threshold_auto(
     logger.info(f"Resolved threshold for metric '{threshold_metric}': {threshold:.6f}")
     return threshold
 
-def compute_batch_ad(full_raw_features: np.ndarray, ad_artifacts: Dict) -> Dict[str, np.ndarray]:
-    # 1. Extract the AD components.
-    pca = ad_artifacts.get('pca')
-    ad_scaler = ad_artifacts.get('scaler')
-    t_fps_full = ad_artifacts.get('train_fps')  # Full training feature matrix, e.g. (419, 149)
-    t_desc = ad_artifacts.get('train_desc')     # Training descriptor block, e.g. (419, 20)
-    weights = ad_artifacts.get('weights', {})
+def compute_batch_ad(
+    full_raw_features: np.ndarray,
+    ad_artifacts: Dict[str, Any],
+    plan: FeaturePlan,
+) -> Dict[str, np.ndarray]:
+    pca = ad_artifacts.get("pca")
+    ad_scaler = ad_artifacts.get("scaler")
+    train_pca_xtx_inv = ad_artifacts.get("train_pca_xtx_inv")
+    train_fp_bin = ad_artifacts.get("train_fp_bin")
+    train_desc_scaled = ad_artifacts.get("train_desc_scaled")
+    weights = dict(ad_artifacts.get("weights", {}))
+    if "ad_score_power" in ad_artifacts:
+        weights.setdefault("ad_score_power", float(ad_artifacts["ad_score_power"]))
 
     n_samples = len(full_raw_features)
+    if full_raw_features.shape[1] != plan.n_features_total:
+        raise ValueError(
+            f"AD input feature dim mismatch: {full_raw_features.shape[1]} vs expected {plan.n_features_total}"
+        )
 
-    # Infer fingerprint dimensionality dynamically.
-    # Example: total features (149) - descriptor features (20) = 129 fingerprint features.
-    if t_fps_full is not None and t_desc is not None:
-        n_fp = t_fps_full.shape[1] - t_desc.shape[1]
-    else:
-        # If training references are unavailable, fall back to a simple heuristic
-        # that assumes a fixed 20-descriptor block.
-        n_fp = full_raw_features.shape[1] - 20 
-
-    # 2. Compute the leverage proxy.
+    n_fp = plan.n_fp
     lev = np.zeros(n_samples, dtype=np.float32)
-    if pca and ad_scaler:
-        lev = _compute_leverage_pca(pca, ad_scaler, full_raw_features)
+    if pca is not None and ad_scaler is not None and train_pca_xtx_inv is not None:
+        lev = _compute_leverage_pca(
+            pca=pca,
+            pca_scaler=ad_scaler,
+            features=full_raw_features,
+            train_pca_xtx_inv=train_pca_xtx_inv,
+        )
 
-    # 3. Scale features for similarity calculations.
-    full_scaled = ad_scaler.transform(full_raw_features) if ad_scaler else full_raw_features
-    
-    # Split dynamically: the first n_fp columns are fingerprints, followed by descriptors.
+    full_scaled = ad_scaler.transform(full_raw_features) if ad_scaler is not None else full_raw_features
     current_batch_fps = full_raw_features[:, :n_fp]
     current_batch_desc_scaled = full_scaled[:, n_fp:]
 
-    # 4. Compute similarity terms.
     max_tanimoto = np.zeros(n_samples, dtype=np.float32)
-    if t_fps_full is not None:
-        # Slice the training matrix the same way to recover fingerprint columns.
-        train_fps_only = t_fps_full[:, :n_fp]
-        max_tanimoto = _compute_tanimoto_similarity(train_fps_only, current_batch_fps)
+    if train_fp_bin is not None:
+        max_tanimoto = _compute_tanimoto_similarity(train_fp_bin, current_batch_fps)
 
     max_cosine = np.zeros(n_samples, dtype=np.float32)
-    if t_desc is not None:
-        # The loaded training descriptor block is typically already scaled.
-        max_cosine = _compute_cosine_similarity(t_desc, current_batch_desc_scaled)
+    if train_desc_scaled is not None:
+        max_cosine = _compute_cosine_similarity(train_desc_scaled, current_batch_desc_scaled)
 
-    # 5. Fuse the AD components into a final score.
-    ad_final = _compute_ad_score(lev, max_tanimoto, max_cosine, weights)
+    density_score = _compute_density_score_from_reference(
+        lev,
+        reference_median=ad_artifacts.get("density_reference_median"),
+    )
+    ad_final = _compute_ad_score(density_score, max_tanimoto, max_cosine, weights)
 
     return {
         "AD_Score": ad_final,
         "leverage": lev,
         "max_tanimoto": max_tanimoto,
-        "max_cosine": max_cosine
+        "max_cosine": max_cosine,
     }
 
 def predict_batch(
@@ -837,7 +976,8 @@ def predict_batch(
             # Call the AD scoring helper.
             ad_out = compute_batch_ad(
                 full_raw_features=full_raw_features,
-                ad_artifacts=ad_artifacts
+                ad_artifacts=ad_artifacts,
+                plan=plan,
             )
             ad_score = ad_out["AD_Score"]
             lev = ad_out["leverage"]
@@ -1043,29 +1183,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise FileNotFoundError(f"Input parquet not found: {input_path}")
 
     paths = build_artifact_paths(model_dir=model_dir, model_name=model_name, seed=seed, calibration=calibration)
-    
-    # Load AD artifacts if integration is enabled
-    ad_artifacts = None
-    if args.ad_integration:
-        try:
-            logger.info("Loading Applicability Domain artifacts...")
-            ad_artifacts = load_ad_artifacts(paths.split_dir, model_name, seed)
-            
-            if ad_artifacts is None:
-                logger.warning("AD artifacts loading returned None")
-                ad_artifacts = {}
-            else:
-                logger.info("AD artifacts loaded successfully")
-                if 'pca' in ad_artifacts and ad_artifacts['pca'] is not None:
-                    logger.info(f"  - PCA components: {ad_artifacts['pca'].n_components_}")
-                if 'train_fps' in ad_artifacts:
-                    logger.info(f"  - Training fingerprints: {ad_artifacts['train_fps'].shape}")
-                if 'train_desc' in ad_artifacts:
-                    logger.info(f"  - Training descriptors: {ad_artifacts['train_desc'].shape}")
-        except Exception as e:
-            logger.error(f"Failed to load AD artifacts: {e}")
-            logger.error("Continuing without AD integration")
-            ad_artifacts = None
     if not paths.feature_names_path.exists():
         raise FileNotFoundError(f"Missing feature_names_final.json: {paths.feature_names_path}")
     if not paths.descriptor_names_path.exists():
@@ -1074,6 +1191,32 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     model, scaler, used_calibration = load_model(paths=paths, model_name=model_name, calibration=calibration)
     plan = load_feature_plan(paths=paths)
     validate_fp_mask(paths=paths, plan=plan)
+
+    ad_artifacts = None
+    if args.ad_integration:
+        try:
+            logger.info("Loading Applicability Domain artifacts...")
+            ad_artifacts = load_ad_artifacts(paths.split_dir, model_name, seed, plan=plan)
+
+            if ad_artifacts is None:
+                logger.warning("AD artifacts loading returned None")
+                ad_artifacts = {}
+            else:
+                logger.info("AD artifacts loaded successfully")
+                if "pca" in ad_artifacts and ad_artifacts["pca"] is not None:
+                    logger.info(f"  - PCA components: {ad_artifacts['pca'].n_components_}")
+                if "train_fp_bin" in ad_artifacts:
+                    logger.info(f"  - Training fingerprints: {ad_artifacts['train_fp_bin'].shape}")
+                if "train_desc_scaled" in ad_artifacts:
+                    logger.info(f"  - Training descriptors: {ad_artifacts['train_desc_scaled'].shape}")
+                if "density_reference_median" in ad_artifacts:
+                    logger.info(
+                        f"  - Density reference median: {float(ad_artifacts['density_reference_median']):.6f}"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to load AD artifacts: {e}")
+            logger.error("Continuing without AD integration")
+            ad_artifacts = None
 
     if str(args.threshold).strip().lower() == "auto":
         threshold = load_threshold_auto(

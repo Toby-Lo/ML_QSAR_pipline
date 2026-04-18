@@ -28,49 +28,8 @@ Usage (CLI):
     --logit-shrinkage-method auto \
     --leverage-pca-variance 0.95 \
     --compare-calibration
-[A]
-  python scripts/step22_applicability_domain.py \
-    --run-dir models_out/qsar_ml_20260412_162829 \
-    --split-seed 12345 \
-    --model SVC \
-    --w1-tanimoto 1 --w2-cosine 0 --w3-similarity 1 --w4-density 0 \
-    --ad-score-power 1.0 \
-    --base-method leverage \
-    --leverage-pca-variance 0.95 \
-    --tanimoto-threshold 0.75 \
-    --domain-threshold-quantile 0.99 \
-    --no-strict-similarity \
-    --base-feature-space fingerprint \
-    --compare-calibration 
-[B]
-  python scripts/step22_applicability_domain.py \
-    --run-dir models_out/qsar_ml_20260412_162829 \
-    --split-seed 12345 \
-    --model SVC \
-    --w1-tanimoto 1 --w2-cosine 0 --w3-similarity 0.8 --w4-density 0.2 \
-    --ad-score-power 1.0 \
-    --base-method leverage \
-    --leverage-pca-variance 0.95 \
-    --tanimoto-threshold 0.75 \
-    --domain-threshold-quantile 0.99 \
-    --no-strict-similarity \
-    --base-feature-space fingerprint \
-    --compare-calibration 
-[C]
-    python scripts/step22_applicability_domain.py \
-    --run-dir models_out/qsar_ml_20260412_162829 \
-    --split-seed 12345 \
-    --model SVC \
-    --w1-tanimoto 0.4 --w2-cosine 0.6 --w3-similarity 0.8 --w4-density 0.2 \
-    --ad-score-power 2.0 \
-    --base-method leverage \
-    --leverage-pca-variance 0.95 \
-    --tanimoto-threshold 0.75 \
-    --domain-threshold-quantile 0.99 \
-    --strict-similarity \
-    --base-feature-space full \
-    --compare-calibration
-[final]
+
+[manual]
     python scripts/step22_applicability_domain.py \
     --run-dir models_out/qsar_ml_20260412_162829 \
     --split-seed 12345 --model SVC \
@@ -84,6 +43,18 @@ Usage (CLI):
     --strict-similarity \
     --compare-calibration
 
+[final]
+  python scripts/step22_applicability_domain.py\
+    --run-dir models_out/qsar_ml_20260412_162829 \
+    --split-seed 12345 --model SVC \
+    --base-method leverage  --leverage-pca-components 70 \
+    --base-feature-space full \
+    --w1-tanimoto 0.9  --w2-cosine 0.1  --w3-similarity 0.05  --w4-density 0.95 \
+    --ad-score-power 2.0 \
+    --tanimoto-threshold 0.85  --cosine-threshold 0.70 \
+    --strict-similarity \
+    --logit-shrinkage-method auto \
+    --compare-calibration
 
 Usage (interactive):
   1) Run the compute/export block (CLI or Jupyter cell)
@@ -593,6 +564,8 @@ def _sigmoid_transform(logit: np.ndarray) -> np.ndarray:
 def _compute_density_score_unified(
     density_arr: np.ndarray,
     base_method: str,
+    reference_arr: Optional[np.ndarray] = None,
+    reference_median: Optional[float] = None,
     eps: float = 1e-9
 ) -> np.ndarray:
     """
@@ -618,6 +591,8 @@ def _compute_density_score_unified(
     Args:
         density_arr: Distance/leverage values (shape: N,), raw output from base method
         base_method: One of ["knn_density", "mahalanobis", "leverage"]
+        reference_arr: Optional training-set reference array used to define a stable scale.
+        reference_median: Optional explicit median reference. Overrides reference_arr if provided.
         eps: Epsilon for numerical stability (prevents division by zero)
     
     Returns:
@@ -632,8 +607,16 @@ def _compute_density_score_unified(
         density_arr
     )
     
-    # Compute median as reference point (robust measure of typical distance)
-    d0 = float(np.median(density_arr))
+    ref = density_arr if reference_arr is None else np.asarray(reference_arr, dtype=np.float64)
+    ref = np.where(
+        (np.isnan(ref) | np.isinf(ref) | (ref < 0)),
+        0.0,
+        ref
+    )
+
+    # Compute median as reference point (robust measure of typical distance).
+    # Using a training-set reference keeps AD scores stable across different query batches.
+    d0 = float(reference_median) if reference_median is not None else float(np.median(ref))
     d0 = max(d0, eps)  # Numerical stability: avoid division by zero
     
     # Apply median-decay function: Score = 1 / (1 + d/d_0)
@@ -1247,6 +1230,7 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
     knn_mean_dist = np.full(len(X_ext_base_scaled), np.nan, dtype=np.float64)
     knn_thr = float("nan")
     knn_train_dist = None  # For computing density score
+    density_reference_raw = None
 
     if base_method == "leverage":
         leverage, h_star, pca_components = _compute_leverage_pca(
@@ -1257,16 +1241,25 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
             ad_output_dir=ad_output_dir,
             scaler_to_save=base_scaler
         )
+        leverage_train, _, _ = _compute_leverage_pca(
+            X_train_scaled=X_train_base_scaled,
+            X_query_scaled=X_train_base_scaled,
+            variance_ratio=config.leverage_pca_variance,
+            fixed_components=config.leverage_pca_components,
+        )
+        density_reference_raw = leverage_train
         base_in_domain = leverage <= h_star
     elif base_method == "mahalanobis":
         d_train, d_ext = _mahalanobis_distance(X_train_base_scaled, X_ext_base_scaled)
         mahalanobis_dist = d_ext
+        density_reference_raw = d_train
         mahalanobis_thr = _quantile_threshold(d_train, config.domain_threshold_quantile)
         base_in_domain = mahalanobis_dist <= mahalanobis_thr
     elif base_method == "knn_density":
         d_train, d_ext = _knn_mean_distance(X_train_base_scaled, X_ext_base_scaled, k=config.knn_k)
         knn_mean_dist = d_ext
         knn_train_dist = d_train  # Store for density score computation
+        density_reference_raw = d_train
         knn_thr = _quantile_threshold(d_train, config.domain_threshold_quantile)
         base_in_domain = knn_mean_dist <= knn_thr
     else:
@@ -1334,13 +1327,14 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
                     dev_fp = dev_fp[:, fp_mask].astype(np.float32)
                 
                 dev_fp_bin = _binarize_fp(dev_fp)
+                dev_desc_scaled = desc_scaler.transform(dev_desc).astype(np.float32)
                 dev_tanimoto = np.zeros(len(dev_fp_bin), dtype=np.float64)
-                dev_cosine = np.zeros(len(dev_desc), dtype=np.float64)
+                dev_cosine = np.zeros(len(dev_desc_scaled), dtype=np.float64)
                 for i in range(len(dev_fp_bin)):
                     # Leave-one-out max similarity
                     mask = np.arange(len(dev_fp_bin)) != i
                     dev_tanimoto[i] = np.max(_tanimoto_max(dev_fp_bin[mask], dev_fp_bin[i:i+1]))
-                    dev_cosine[i] = np.max(cosine_similarity(dev_desc[i:i+1], dev_desc[mask]))
+                    dev_cosine[i] = np.max(cosine_similarity(dev_desc_scaled[i:i+1], dev_desc_scaled[mask]))
 
                 # Compute dev set density (TASK 2: unified)
                 if base_method == "knn_density" and knn_train_dist is not None:
@@ -1349,15 +1343,21 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
                     d_train_maha, _ = _mahalanobis_distance(X_train_base_scaled, X_train_base_scaled)
                     dev_density_raw = d_train_maha
                 elif base_method == "leverage":
-                    leverage_train, _, _ = _compute_leverage_pca(
-                        X_train_base_scaled, X_train_base_scaled, config.leverage_pca_variance,
-                        fixed_components=config.leverage_pca_components
-                    )
+                    leverage_train = density_reference_raw
+                    if leverage_train is None:
+                        leverage_train, _, _ = _compute_leverage_pca(
+                            X_train_base_scaled, X_train_base_scaled, config.leverage_pca_variance,
+                            fixed_components=config.leverage_pca_components
+                        )
                     dev_density_raw = leverage_train
                 else:
                     dev_density_raw = np.ones(len(X_train_base))
 
-                dev_density = _compute_density_score_unified(dev_density_raw, base_method)
+                dev_density = _compute_density_score_unified(
+                    dev_density_raw,
+                    base_method,
+                    reference_arr=density_reference_raw,
+                )
 
                 # Compute error metric
                 dev_y_true = dev_preds[config.y_true_column].astype(float).to_numpy()
@@ -1395,7 +1395,11 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
     else:
         ext_density_raw = np.ones(len(X_ext_base_scaled))
     
-    density_score = _compute_density_score_unified(ext_density_raw, base_method)
+    density_score = _compute_density_score_unified(
+        ext_density_raw,
+        base_method,
+        reference_arr=density_reference_raw,
+    )
 
     # Compute continuous AD score with learned weights
     tanimoto_clipped = np.clip(tanimoto_max.astype(np.float64), 0.0, 1.0)
@@ -1593,9 +1597,13 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
         },
         "continuous_ad_scores": {
             "ad_score_power": float(config.ad_score_power),
+            "density_reference_median": float(np.median(np.asarray(density_reference_raw, dtype=np.float64)))
+            if density_reference_raw is not None and len(np.asarray(density_reference_raw).reshape(-1)) > 0
+            else None,
             "sim_score_weights": {"tanimoto": float(w1), "cosine": float(w2)},
             "ad_score_weights": {"similarity": float(w3), "density": float(w4)},
             "weight_learning_config": weight_config if weight_config else {"w1": w1, "w2": w2, "w3": w3, "w4": w4},
+            "weights_learned": bool(config.learn_weights and weight_config is not None),
             "weight_optimization_grid": int(config.weight_search_grid) if config.learn_weights else None,
             "sim_score_mean": float(np.mean(sim_score)) if len(sim_score) else 0.0,
             "sim_score_std": float(np.std(sim_score)) if len(sim_score) else 0.0,
@@ -2011,7 +2019,7 @@ def main() -> None:
     print(f"  - AD_Score weights: Similarity={ad_weights['similarity']:.3f}, Density={ad_weights['density']:.3f}")
     
     if summary['continuous_ad_scores']['weight_learning_config']:
-        print(f"  - Weights learned: {bool(summary['continuous_ad_scores']['weight_learning_config'])}")
+        print(f"  - Weights learned: {bool(summary['continuous_ad_scores'].get('weights_learned', False))}")
     
     # TASK 4: Print calibration diagnostics
     calib_diag = summary.get('calibration_diagnostics', {})
@@ -2049,23 +2057,19 @@ if __name__ == "__main__":
 # %%
 # Plotting-only cell (interactive)
 ##############################################################################
-# Goal:
-#   - Quickly visualize AD results WITHOUT recomputing
-#   - Export publication-ready figures (PNG + SVG)
+# Goal: visualize AD exports WITHOUT recomputing
+# Inputs (from OUT_DIR):
+#   - ad_external_predictions.csv (required; source of truth for plotting)
+#   - ad_plot_data.npz            (optional; fast arrays)
+#   - ad_summary.json             (optional; h_star + config metadata)
+#   - ad_calibration_curve.csv    (optional; bin-level curve)
 #
 # Usage:
-#   - Modify OUT_DIR below
-#   - Run this cell in VSCode / Jupyter
-#
-# NOTE:
-#   - Will NOT execute in CLI mode
+#   - Set OUT_DIR below, OR set env var AD_OUT_DIR to an output folder.
+#   - Run this cell in VSCode / Jupyter (will not execute in CLI mode).
 ##############################################################################
 
 from pathlib import Path
-from typing import Any, Dict, List
-
-import numpy as np
-import pandas as pd
 
 
 def _in_ipython() -> bool:
@@ -2077,22 +2081,28 @@ def _in_ipython() -> bool:
 
 
 if _in_ipython():
+    import json
+    import os
+    from typing import Any, Dict, List, Optional, Tuple
 
-    # ── Plot style config ──────────────────────────────────────────────
+    import numpy as np
+    import pandas as pd
+    from matplotlib import pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    # Plot style config
     PLOT_STYLE: Dict[str, Any] = {
-        "font_family": "Cambria",       # Cambria, Times New Roman
+        "font_family": "Cambria",
         "font_size": 11,
         "dpi": 600,
         "grid_alpha": 0.25,
         "axes_linewidth": 1.1,
     }
 
-    # Consistent colour palette (in-domain / out-of-domain)
-    _C_IN = "#4C72B0"     # muted blue
-    _C_OUT = "#DD8452"    # muted orange
+    _C_IN = "#4C72B0"
+    _C_OUT = "#DD8452"
     _C_BAR = [_C_IN, _C_OUT]
 
-    # Shared legend kwargs
     _LEGEND_KW: Dict[str, Any] = dict(
         loc="upper right",
         frameon=True,
@@ -2102,190 +2112,195 @@ if _in_ipython():
         fontsize=9,
     )
 
-
-    # ── Resolve project root ───────────────────────────────────────────
     def _guess_project_root() -> Path:
         candidates: List[Path] = []
-
         try:
             candidates.append(Path(__file__).resolve().parent.parent)
         except Exception:
             pass
-
         cwd = Path.cwd().resolve()
         candidates.append(cwd)
         candidates.extend(list(cwd.parents))
-
         for c in candidates:
             if (c / "models_out").exists():
                 return c
-
         return cwd
 
     PROJECT_ROOT = _guess_project_root()
 
-
-    # 👉 adjust here
-    OUT_DIR = (
-        PROJECT_ROOT
-        / "models_out/qsar_ml_20260412_162829"
-        / "split_seed_12345/validation/applicability_domain/SVC/seed_12345"
-    )
-
-    # ── Load data ──────────────────────────────────────────────────────
-    ad_csv = OUT_DIR / "ad_external_predictions.csv"
-    ad_npz = OUT_DIR / "ad_plot_data.npz"
-
-    if not ad_csv.exists() or not ad_npz.exists():
-        raise FileNotFoundError(
-            "AD export files not found.\n"
-            f"CWD: {Path.cwd().resolve()}\n"
-            f"PROJECT_ROOT: {PROJECT_ROOT}\n"
-            f"Expected:\n  - {ad_csv}\n  - {ad_npz}"
+    # Adjust here, or set env var AD_OUT_DIR
+    OUT_DIR = Path(
+        os.environ.get(
+            "AD_OUT_DIR",
+            str(
+                PROJECT_ROOT
+                / "models_out/qsar_ml_20260412_162829"
+                / "split_seed_12345/validation/applicability_domain/SVC/seed_12345"
+            ),
         )
-
-    df = pd.read_csv(ad_csv)
-    plot_data = np.load(ad_npz, allow_pickle=True)
-
-    leverage   = plot_data["leverage"]
-    std_resid  = plot_data["std_resid"]
-    in_domain  = plot_data["in_domain"].astype(bool)
-
-
-    # Resolve optional columns
-    def _safe_get(col_names):
-        for c in col_names:
-            if c in df.columns:
-                return df[c].values
-        return None
-
-    density  = _safe_get(["KNN_Density", "knn_density"])
-    tanimoto = _safe_get(["Tanimoto_max", "tanimoto_max"])
-    error    = _safe_get(["LogLoss", "logloss", "AbsProbError", "abs_error"])
-
-    # ── Matplotlib global style ────────────────────────────────────────
-    from matplotlib import pyplot as plt
-    from matplotlib.ticker import MaxNLocator
-
-    plt.rcParams.update(
-        {
-            "font.family":      "serif",
-            "font.serif":       [PLOT_STYLE["font_family"]],
-            "font.size":        PLOT_STYLE["font_size"],
-            "figure.dpi":       PLOT_STYLE["dpi"],
-            "savefig.dpi":      PLOT_STYLE["dpi"],
-            "axes.linewidth":   PLOT_STYLE["axes_linewidth"],
-            "axes.spines.top":  False,
-            "axes.spines.right": False,
-            "axes.grid":        True,
-            "grid.linestyle":   ":",
-            "grid.alpha":       PLOT_STYLE["grid_alpha"],
-        }
-    )
-
+    ).expanduser().resolve()
 
     def _style_axis(ax) -> None:
-        """Apply shared axis polish (grid + tick direction)."""
         ax.grid(True, linestyle=":", alpha=PLOT_STYLE["grid_alpha"])
         ax.tick_params(direction="out", length=4, width=1)
 
-
     def _save(fig, path_base: Path) -> None:
-        """Save figure as PNG + SVG, then close."""
         fig.savefig(path_base.with_suffix(".png"))
         fig.savefig(path_base.with_suffix(".svg"))
         plt.close(fig)
 
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": [PLOT_STYLE["font_family"]],
+            "font.size": PLOT_STYLE["font_size"],
+            "figure.dpi": PLOT_STYLE["dpi"],
+            "savefig.dpi": PLOT_STYLE["dpi"],
+            "axes.linewidth": PLOT_STYLE["axes_linewidth"],
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.linestyle": ":",
+            "grid.alpha": PLOT_STYLE["grid_alpha"],
+        }
+    )
 
-    print(f"[INFO] Saving figures to: {OUT_DIR}")
+    def _col(df: "pd.DataFrame", names: List[str], *, required: bool = False, dtype=None):
+        for name in names:
+            if name in df.columns:
+                out = df[name].to_numpy(copy=False)
+                return out.astype(dtype, copy=False) if dtype is not None else out
+        if required:
+            raise KeyError(f"Missing required column. Tried: {names}. Available: {list(df.columns)[:30]} ...")
+        return None
 
-    # ── 1. Williams-style plot: Leverage vs Residual ───────────────────
-    fig, ax = plt.subplots(figsize=(4.8, 3.6), constrained_layout=True)
+    def _load_outputs(out_dir: Path) -> Tuple["pd.DataFrame", Optional[dict], Optional[dict], Optional["pd.DataFrame"]]:
+        ad_csv = out_dir / "ad_external_predictions.csv"
+        if not ad_csv.exists():
+            raise FileNotFoundError(f"Missing required file: {ad_csv}")
+        df_local = pd.read_csv(ad_csv)
 
-    # Calculate Williams threshold: h* = 3(p + 1) / n
-    # Estimate p (number of features) from leverage statistics
-    if len(leverage) > 0:
-        # Use mean leverage to estimate p: mean(h) = (p+1)/n
-        mean_leverage = np.mean(leverage)
-        n_samples = len(leverage)
+        plot_npz = out_dir / "ad_plot_data.npz"
+        plot_data_local = None
+        if plot_npz.exists():
+            plot_data_local = dict(np.load(plot_npz, allow_pickle=True))
+
+        summary_path = out_dir / "ad_summary.json"
+        summary_local = None
+        if summary_path.exists():
+            summary_local = json.loads(summary_path.read_text())
+
+        cal_curve_path = out_dir / "ad_calibration_curve.csv"
+        cal_df_local = pd.read_csv(cal_curve_path) if cal_curve_path.exists() else None
+        return df_local, plot_data_local, summary_local, cal_df_local
+
+    df, plot_data, summary_dict, cal_df = _load_outputs(OUT_DIR)
+    print(f"[INFO] Plot OUT_DIR: {OUT_DIR}")
+    print(f"[INFO] Loaded rows: {len(df)}; cols: {len(df.columns)}")
+
+    in_domain = _col(df, ["In_Domain", "in_domain"], dtype=bool)
+    if in_domain is None and plot_data is not None and "in_domain" in plot_data:
+        in_domain = np.asarray(plot_data["in_domain"]).astype(bool)
+    if in_domain is None:
+        in_domain = np.ones((len(df),), dtype=bool)
+
+    leverage = _col(df, ["Leverage", "leverage"])
+    if leverage is None and plot_data is not None and "leverage" in plot_data:
+        leverage = np.asarray(plot_data["leverage"])
+    std_resid = _col(df, ["StdResidual", "std_resid", "DevianceResidual"])
+    if std_resid is None and plot_data is not None and "std_resid" in plot_data:
+        std_resid = np.asarray(plot_data["std_resid"])
+
+    error = _col(df, ["LogLoss", "log_loss", "AbsProbError", "abs_prob_error", "AbsError", "abs_error"])
+    tanimoto = _col(df, ["Tanimoto_max", "tanimoto_max"])
+    density_score = _col(df, ["Density_Score", "density_score"])
+    if density_score is None and plot_data is not None and "density_score" in plot_data:
+        density_score = np.asarray(plot_data["density_score"])
+    ad_score = _col(df, ["AD_Score", "ad_score"])
+    if ad_score is None and plot_data is not None and "ad_score" in plot_data:
+        ad_score = np.asarray(plot_data["ad_score"])
+
+    # h_star: prefer explicit export, then summary, then estimate.
+    h_star = None
+    h_star_col = _col(df, ["Leverage_h_star", "h_star"])
+    if h_star_col is not None:
+        uniq = pd.unique(pd.Series(h_star_col).dropna())
+        if len(uniq) == 1:
+            h_star = float(uniq[0])
+    if h_star is None and isinstance(summary_dict, dict) and "h_star" in summary_dict:
+        try:
+            h_star = float(summary_dict["h_star"])
+        except Exception:
+            h_star = None
+    if h_star is None and leverage is not None and len(leverage) > 0:
+        mean_leverage = float(np.mean(leverage))
+        n_samples = int(len(leverage))
         p_estimated = max(1, int(mean_leverage * n_samples - 1))
-        h_star = 3 * (p_estimated + 1) / n_samples
-    else:
-        h_star = 0.1  # fallback
+        h_star = float(3.0 * (p_estimated + 1) / max(1, n_samples))
 
-    # Plot data points
-    ax.scatter(
-        leverage[in_domain], std_resid[in_domain],
-        s=20, alpha=0.55, color=_C_IN, edgecolors="none", label="In-domain",
-    )
-    ax.scatter(
-        leverage[~in_domain], std_resid[~in_domain],
-        s=26, alpha=0.80, color=_C_OUT, marker="D", edgecolors="white",
-        linewidths=0.4, label="Out-of-domain",
-    )
+    if plot_data is not None and "leverage" in plot_data and len(plot_data["leverage"]) != len(df):
+        print(f"[WARN] npz length mismatch: leverage={len(plot_data['leverage'])} vs csv={len(df)}. Using CSV columns first.")
 
-    # Add Williams threshold lines
-    ax.axvline(x=h_star, color='red', linestyle='--', linewidth=1.5, 
-               alpha=0.8, label=f"h* = {h_star:.3f}")
-    ax.axhline(y=2, color='purple', linestyle='--', linewidth=1.2, 
-               alpha=0.7, label="±2σ (95%)")
-    ax.axhline(y=-2, color='purple', linestyle='--', linewidth=1.2, alpha=0.7)
-    ax.axhline(y=3, color='darkred', linestyle=':', linewidth=1.0, 
-               alpha=0.6, label="±3σ (99%)")
-    ax.axhline(y=-3, color='darkred', linestyle=':', linewidth=1.0, alpha=0.6)
-
-    ax.set_xlabel("Leverage ($h$)")
-    ax.set_ylabel("Std. deviance residual")
-    ax.set_title("Williams Plot: Leverage vs Residual")
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
-    ax.set_ylim(-4, 4)  # Symmetric Y-axis for better bias detection
-    _style_axis(ax)
-    
-    # Move legend outside if needed
-    legend_kw = _LEGEND_KW.copy()
-    if len(leverage) > 50:  # Many points, move legend outside
-        legend_kw.update({
-            "loc": "upper left",
-            "bbox_to_anchor": (1.02, 1),
-            "borderaxespad": 0.
-        })
-    ax.legend(**legend_kw)
-
-    plt.show()
-    _save(fig, OUT_DIR / "ad_vs_residual")
-
-    # ── 2. Density vs Error ────────────────────────────────────────────
-    if density is not None and error is not None:
-
-        fig, ax = plt.subplots(figsize=(4.4, 3.2), constrained_layout=True)
-
+    # 1) Williams plot (Leverage vs StdResidual)
+    if leverage is not None and std_resid is not None:
+        fig, ax = plt.subplots(figsize=(4.8, 3.6), constrained_layout=True)
         ax.scatter(
-            density[in_domain], error[in_domain],
+            leverage[in_domain], std_resid[in_domain],
             s=20, alpha=0.55, color=_C_IN, edgecolors="none", label="In-domain",
         )
         ax.scatter(
-            density[~in_domain], error[~in_domain],
+            leverage[~in_domain], std_resid[~in_domain],
             s=26, alpha=0.80, color=_C_OUT, marker="D", edgecolors="white",
             linewidths=0.4, label="Out-of-domain",
         )
+        if h_star is not None:
+            ax.axvline(x=float(h_star), color="red", linestyle="--", linewidth=1.5, alpha=0.8, label=f"h* = {h_star:.3f}")
+        ax.axhline(y=2, color="purple", linestyle="--", linewidth=1.2, alpha=0.7, label="±2σ")
+        ax.axhline(y=-2, color="purple", linestyle="--", linewidth=1.2, alpha=0.7)
+        ax.axhline(y=3, color="darkred", linestyle=":", linewidth=1.0, alpha=0.6, label="±3σ")
+        ax.axhline(y=-3, color="darkred", linestyle=":", linewidth=1.0, alpha=0.6)
+        ax.set_xlabel("Leverage ($h$)")
+        ax.set_ylabel("Std. deviance residual")
+        ax.set_title("Williams Plot: Leverage vs Residual")
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
+        ax.set_ylim(-4, 4)
+        _style_axis(ax)
+        legend_kw = dict(_LEGEND_KW)
+        if len(leverage) > 50:
+            legend_kw.update({"loc": "upper left", "bbox_to_anchor": (1.02, 1), "borderaxespad": 0.0})
+        ax.legend(**legend_kw)
+        plt.show()
+        _save(fig, OUT_DIR / "ad_vs_residual")
+        print("[EXPORT] ad_vs_residual")
+    else:
+        print("[WARN] Skip Williams plot (missing Leverage/StdResidual)")
 
-        ax.set_xlabel("kNN Density Score")
-        ax.set_ylabel("Log-Loss Error")
+    # 2) Density score vs error
+    if density_score is not None and error is not None:
+        fig, ax = plt.subplots(figsize=(4.4, 3.2), constrained_layout=True)
+        ax.scatter(
+            density_score[in_domain], error[in_domain],
+            s=20, alpha=0.55, color=_C_IN, edgecolors="none", label="In-domain",
+        )
+        ax.scatter(
+            density_score[~in_domain], error[~in_domain],
+            s=26, alpha=0.80, color=_C_OUT, marker="D", edgecolors="white",
+            linewidths=0.4, label="Out-of-domain",
+        )
+        ax.set_xlabel("Density Score")
+        ax.set_ylabel("Error (LogLoss / AbsProbError)")
         ax.set_title("Density vs Prediction Error")
         _style_axis(ax)
         ax.legend(**_LEGEND_KW)
-
         plt.show()
         _save(fig, OUT_DIR / "density_vs_error")
-
+        print("[EXPORT] density_vs_error")
     else:
-        print("[WARN] Skip Density plot (missing column)")
+        print("[WARN] Skip Density plot (missing Density_Score or Error column)")
 
-    # ── 3. Similarity vs Error ─────────────────────────────────────────
+    # 3) Similarity (Tanimoto) vs error
     if tanimoto is not None and error is not None:
-
         fig, ax = plt.subplots(figsize=(4.4, 3.2), constrained_layout=True)
-
         ax.scatter(
             tanimoto[in_domain], error[in_domain],
             s=20, alpha=0.55, color=_C_IN, edgecolors="none", label="In-domain",
@@ -2295,68 +2310,47 @@ if _in_ipython():
             s=26, alpha=0.80, color=_C_OUT, marker="D", edgecolors="white",
             linewidths=0.4, label="Out-of-domain",
         )
-
         ax.set_xlabel("Max Tanimoto Similarity")
-        ax.set_ylabel("Log-Loss Error")
+        ax.set_ylabel("Error (LogLoss / AbsProbError)")
         ax.set_title("Fingerprint Similarity vs Prediction Error")
         _style_axis(ax)
         ax.legend(**_LEGEND_KW)
-
         plt.show()
         _save(fig, OUT_DIR / "similarity_vs_error")
-
+        print("[EXPORT] similarity_vs_error")
     else:
-        print("[WARN] Skip Similarity plot (missing column)")
+        print("[WARN] Skip Similarity plot (missing Tanimoto_max or Error column)")
 
-    # ── 4. AD Coverage (bar chart) ─────────────────────────────────────
+    # 4) Coverage bar
     fig, ax = plt.subplots(figsize=(3.6, 3.2), constrained_layout=True)
-
-    n_total = len(in_domain)
+    n_total = int(len(in_domain))
     counts = [int(np.sum(in_domain)), int(np.sum(~in_domain))]
     labels = ["In-domain", "Out-of-domain"]
-
     bars = ax.bar(labels, counts, color=_C_BAR, edgecolor="white", linewidth=0.8)
-
-    # Annotate counts + percentages
     for bar, cnt in zip(bars, counts):
         pct = 100.0 * cnt / n_total if n_total > 0 else 0.0
         ax.text(
             bar.get_x() + bar.get_width() / 2.0,
-            bar.get_height() + max(counts) * 0.02,
-            f"{cnt}  ({pct:.1f}%)",
-            ha="center", va="bottom", fontsize=9,
+            bar.get_height() + max(counts) * 0.02 if max(counts) > 0 else 0.5,
+            f"{cnt} ({pct:.1f}%)",
+            ha="center",
+            va="bottom",
+            fontsize=9,
         )
-
     ax.set_ylabel("Number of samples")
-    ax.set_title("AD Coverage")
-    ax.set_ylim(0, max(counts) * 1.18)   # headroom for annotations
+    ax.set_title("AD Coverage (In_Domain flag)")
+    ax.set_ylim(0, max(counts) * 1.18 if max(counts) > 0 else 1.0)
     _style_axis(ax)
-
     plt.show()
     _save(fig, OUT_DIR / "ad_coverage")
+    print("[EXPORT] ad_coverage")
 
-    print("[DONE] Core plots (1-4) generated.")
-
-    # ── 5. Advanced: Calibration Curve + Score Comparison ──────────────
-    # (Optional: requires ad_calibration_curve.csv, ad_summary.json)
-
-    import json
-
-    cal_curve_path = OUT_DIR / "ad_calibration_curve.csv"
-    summary_path   = OUT_DIR / "ad_summary.json"
-
-    if cal_curve_path.exists() and summary_path.exists():
-        cal_df = pd.read_csv(cal_curve_path)
-        with open(summary_path) as f:
-            summary_dict = json.load(f)
-
+    # 5) Optional calibration curve + metrics
+    if cal_df is not None and isinstance(summary_dict, dict):
         scores_dict = summary_dict.get("continuous_ad_scores", {})
-
-        # 5a. Calibration Curve with Error Trends
         fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.4), constrained_layout=True)
-
         ax = axes[0]
-        if len(cal_df) > 0:
+        if len(cal_df) > 0 and {"ad_mean", "error_mean", "error_std"}.issubset(set(cal_df.columns)):
             ax.errorbar(
                 cal_df["ad_mean"],
                 cal_df["error_mean"],
@@ -2378,191 +2372,112 @@ if _in_ipython():
                 alpha=0.15,
             )
         ax.set_xlabel("AD Score")
-        ax.set_ylabel("Log-Loss Error")
+        ax.set_ylabel("LogLoss Error")
         ax.set_title("Calibration: AD Score vs Error")
         _style_axis(ax)
         ax.legend(**_LEGEND_KW)
 
-        # 5b. Performance metrics summary
         ax = axes[1]
-        ad_error_corr = scores_dict.get("ad_error_correlation", 0.0)
-        _shrunk_mean = scores_dict.get(
-            "final_score_shrunk_mean",
-            scores_dict.get("final_score_logit_mean", 0),
-        )
+        ad_error_corr = float(scores_dict.get("ad_error_correlation", 0.0) or 0.0)
+        shrunk_mean = float(scores_dict.get("final_score_shrunk_mean", scores_dict.get("final_score_logit_mean", 0.0)) or 0.0)
         metrics_text = (
             f"AD-Error Corr: {ad_error_corr:+.4f}\n"
+            f"Density ref median: {scores_dict.get('density_reference_median', 'NA')}\n"
             f"\nAD_Score:\n"
             f"  μ = {scores_dict.get('ad_score_mean', 0):.3f}\n"
             f"  σ = {scores_dict.get('ad_score_std', 0):.3f}\n"
-            f"\nFinal_Score (trad):\n"
+            f"\nFinal_Score:\n"
             f"  μ = {scores_dict.get('final_score_mean', 0):.3f}\n"
             f"\nFinal_Score_Shrunk:\n"
-            f"  μ = {_shrunk_mean:.3f}"
+            f"  μ = {shrunk_mean:.3f}"
         )
         ax.text(
-            0.08, 0.95,
+            0.08,
+            0.95,
             metrics_text,
             transform=ax.transAxes,
             fontsize=9,
             family="monospace",
             verticalalignment="top",
-            
-            bbox=dict(
-                boxstyle="round,pad=0.4",
-                facecolor="wheat",
-                edgecolor="0.70",
-                alpha=0.35,
-            ),
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", edgecolor="0.70", alpha=0.35),
         )
         ax.set_title("Summary Metrics")
         ax.axis("off")
-
         plt.show()
         _save(fig, OUT_DIR / "ad_calibration_metrics")
         print("[EXPORT] ad_calibration_metrics")
-
     else:
-        print("[INFO] Calibration files not found (skipped advanced plots)")
+        print("[INFO] Calibration files not found (skipped calibration plot)")
 
-    print("[OK] All AD visualizations complete.")
-
-# %%
-# Advanced Analysis: Error Distribution & Activity Cliff Detection
-##############################################################################
-# Additional visualizations for deeper AD analysis
-# - A. Error distribution comparison (in-domain vs out-of-domain)
-# - B. Activity cliff detection in Williams plot
-##############################################################################
-
-if _in_ipython():
-    
+    # Advanced: error distribution + activity cliffs
     from scipy.stats import gaussian_kde
-    import seaborn as sns
-    
-    print("[INFO] Generating advanced analysis plots...")
-    
-    # ── A. Error Distribution Comparison ────────────────────────────────
+
     if error is not None:
         fig, ax = plt.subplots(figsize=(5.0, 3.6), constrained_layout=True)
-        
-        # Separate errors by domain
-        error_in = error[in_domain]
-        error_out = error[~in_domain]
-        
-        # Create KDE plots
-        if len(error_in) > 1:
-            kde_in = gaussian_kde(error_in)
-            x_in = np.linspace(error_in.min(), error_in.max(), 100)
-            ax.plot(x_in, kde_in(x_in), color=_C_IN, linewidth=2, 
-                   label="In-domain", alpha=0.8)
+        err_in = np.asarray(error)[in_domain]
+        err_out = np.asarray(error)[~in_domain]
+        if len(err_in) > 1:
+            kde_in = gaussian_kde(err_in)
+            x_in = np.linspace(float(np.min(err_in)), float(np.max(err_in)), 100)
+            ax.plot(x_in, kde_in(x_in), color=_C_IN, linewidth=2, label="In-domain", alpha=0.8)
             ax.fill_between(x_in, kde_in(x_in), alpha=0.3, color=_C_IN)
-        
-        if len(error_out) > 1:
-            kde_out = gaussian_kde(error_out)
-            x_out = np.linspace(error_out.min(), error_out.max(), 100)
-            ax.plot(x_out, kde_out(x_out), color=_C_OUT, linewidth=2, 
-                   label="Out-of-domain", alpha=0.8)
+            ax.axvline(float(np.mean(err_in)), color=_C_IN, linestyle="--", alpha=0.7, linewidth=1)
+        if len(err_out) > 1:
+            kde_out = gaussian_kde(err_out)
+            x_out = np.linspace(float(np.min(err_out)), float(np.max(err_out)), 100)
+            ax.plot(x_out, kde_out(x_out), color=_C_OUT, linewidth=2, label="Out-of-domain", alpha=0.8)
             ax.fill_between(x_out, kde_out(x_out), alpha=0.3, color=_C_OUT)
-        
-        # Add vertical lines for means
-        if len(error_in) > 0:
-            ax.axvline(error_in.mean(), color=_C_IN, linestyle='--', 
-                      alpha=0.7, linewidth=1)
-        if len(error_out) > 0:
-            ax.axvline(error_out.mean(), color=_C_OUT, linestyle='--', 
-                      alpha=0.7, linewidth=1)
-        
-        ax.set_xlabel("Prediction Error")
+            ax.axvline(float(np.mean(err_out)), color=_C_OUT, linestyle="--", alpha=0.7, linewidth=1)
+        ax.set_xlabel("Error (LogLoss / AbsProbError)")
         ax.set_ylabel("Density")
-        ax.set_title("Error Distribution: In-Domain vs Out-of-Domain")
+        ax.set_title("Error Distribution: In-domain vs Out-of-domain")
         _style_axis(ax)
         ax.legend(**_LEGEND_KW)
-        
         plt.show()
         _save(fig, OUT_DIR / "error_distribution_comparison")
         print("[EXPORT] error_distribution_comparison")
-    
-    # ── B. Activity Cliff Detection ─────────────────────────────────────
-    # Identify compounds with high similarity but poor prediction
-    if len(leverage) > 0 and error is not None:
+
+    if leverage is not None and std_resid is not None and h_star is not None:
         fig, ax = plt.subplots(figsize=(5.2, 3.8), constrained_layout=True)
-        
-        # Calculate activity cliff criteria
-        # Activity cliffs: h < h* (structurally similar) AND |residual| > 2 (poor prediction)
-        activity_cliff_mask = (leverage < h_star) & (np.abs(std_resid) > 2)
-        
-        # Plot all points
+        activity_cliff_mask = (np.asarray(leverage) < float(h_star)) & (np.abs(np.asarray(std_resid)) > 2)
         ax.scatter(
-            leverage[in_domain & ~activity_cliff_mask], 
-            std_resid[in_domain & ~activity_cliff_mask],
+            np.asarray(leverage)[in_domain & ~activity_cliff_mask],
+            np.asarray(std_resid)[in_domain & ~activity_cliff_mask],
             s=18, alpha=0.4, color=_C_IN, edgecolors="none", label="In-domain",
         )
         ax.scatter(
-            leverage[~in_domain & ~activity_cliff_mask], 
-            std_resid[~in_domain & ~activity_cliff_mask],
+            np.asarray(leverage)[~in_domain & ~activity_cliff_mask],
+            np.asarray(std_resid)[~in_domain & ~activity_cliff_mask],
             s=22, alpha=0.6, color=_C_OUT, marker="D", edgecolors="white",
             linewidths=0.4, label="Out-of-domain",
         )
-        
-        # Highlight activity cliffs
-        if np.sum(activity_cliff_mask) > 0:
+        if np.any(activity_cliff_mask):
             ax.scatter(
-                leverage[activity_cliff_mask], std_resid[activity_cliff_mask],
-                s=60, alpha=0.9, color='red', marker='*', edgecolors='darkred',
+                np.asarray(leverage)[activity_cliff_mask],
+                np.asarray(std_resid)[activity_cliff_mask],
+                s=60, alpha=0.9, color="red", marker="*", edgecolors="darkred",
                 linewidths=1.0, label="Activity Cliff", zorder=10
             )
-            
-            # Annotate activity cliffs with their indices
-            cliff_indices = np.where(activity_cliff_mask)[0]
-            for idx in cliff_indices[:10]:  # Limit annotations to first 10
-                ax.annotate(f"{idx}", 
-                           xy=(leverage[idx], std_resid[idx]),
-                           xytext=(5, 5), textcoords='offset points',
-                           fontsize=7, alpha=0.8, color='darkred')
-        
-        # Add threshold lines
-        ax.axvline(x=h_star, color='red', linestyle='--', linewidth=1.5, 
-                   alpha=0.8, label=f"h* = {h_star:.3f}")
-        ax.axhline(y=2, color='purple', linestyle='--', linewidth=1.2, alpha=0.7)
-        ax.axhline(y=-2, color='purple', linestyle='--', linewidth=1.2, alpha=0.7)
-        
-        # Highlight activity cliff region
-        ax.axvspan(0, h_star, ymin=0.5, ymax=0.75, alpha=0.1, color='red',
-                  label="Cliff Region")
-        ax.axvspan(0, h_star, ymin=0.25, ymax=0.5, alpha=0.1, color='red')
-        
+        ax.axvline(x=float(h_star), color="red", linestyle="--", linewidth=1.5, alpha=0.8, label=f"h* = {h_star:.3f}")
+        ax.axhline(y=2, color="purple", linestyle="--", linewidth=1.2, alpha=0.7)
+        ax.axhline(y=-2, color="purple", linestyle="--", linewidth=1.2, alpha=0.7)
         ax.set_xlabel("Leverage ($h$)")
         ax.set_ylabel("Std. deviance residual")
-        ax.set_title(f"Activity Cliff Detection (n={np.sum(activity_cliff_mask)} cliffs)")
+        ax.set_title(f"Activity Cliff Detection (n={int(np.sum(activity_cliff_mask))})")
         ax.set_ylim(-4, 4)
         _style_axis(ax)
-        
-        # Legend with cliff statistics
-        legend_text = f"Cliffs: {np.sum(activity_cliff_mask)}"
-        ax.legend(title=legend_text, **{
+        ax.legend(**{
             "loc": "upper left",
             "bbox_to_anchor": (1.02, 1),
-            "borderaxespad": 0.,
+            "borderaxespad": 0.0,
             "frameon": True,
             "fancybox": True,
             "edgecolor": "0.70",
             "framealpha": 0.90,
             "fontsize": 9,
         })
-        
         plt.show()
         _save(fig, OUT_DIR / "activity_cliff_detection")
-        
-        # Print cliff statistics
-        print(f"[ACTIVITY CLIFFS] Found {np.sum(activity_cliff_mask)} potential activity cliffs")
-        if np.sum(activity_cliff_mask) > 0:
-            cliff_indices = np.where(activity_cliff_mask)[0]
-            print(f"  - Cliff indices: {cliff_indices[:10]}{'...' if len(cliff_indices) > 10 else ''}")
-            print(f"  - Mean leverage: {leverage[activity_cliff_mask].mean():.3f}")
-            print(f"  - Mean |residual|: {np.abs(std_resid[activity_cliff_mask]).mean():.3f}")
         print("[EXPORT] activity_cliff_detection")
-    
-    print("[OK] Advanced analysis complete.")
 
-# %%
+    print("[OK] AD visualizations complete.")
