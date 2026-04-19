@@ -61,17 +61,6 @@ python scripts/step33_vs_inference.py \
   --output ./models_out/qsar_ml_20260412_162829/virtual_screening/A1A0M_inference/A1A0M_inference_result.parquet \
   --ad_integration
 
-python scripts/step33_vs_inference.py \
-  --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
-  --model_name SVC \
-  --seed 12345 \
-  --calibration sigmoid \
-  --threshold auto \
-  --threshold_metric mcc \
-  --input ./models_out/qsar_ml_20260412_162829/original_ligand_QSAR/A1A0M_feature.parquet \
-  --output ./models_out/qsar_ml_20260412_162829/original_ligand_QSAR/A1A0M_inference_result_sigmoid.parquet \
-  --ad_integration
-
 [Inference for NSD2 development set]
 python scripts/step33_vs_inference.py \
   --model_dir ./models_out/qsar_ml_20260412_162829/split_seed_12345 \
@@ -992,12 +981,20 @@ def predict_batch(
     out = pd.DataFrame({
         "zinc_id": zid_calc,
         "smiles": smi_calc,
+        # Keep legacy column names for backward compatibility.
         "prob": proba,
         "pred_label": (proba >= threshold).astype(np.int8),
         "AD_Score": ad_score,
         "leverage": lev,
         "max_tanimoto": tanimoto,
-        "max_cosine": cosine
+        "max_cosine": cosine,
+        # Canonical names for downstream scoring layers (step35+).
+        "qsar_prob": proba,
+        "qsar_pred_label": (proba >= threshold).astype(np.int8),
+        "ad_score": ad_score,
+        "ad_leverage": lev,
+        "ad_max_tanimoto": tanimoto,
+        "ad_max_cosine": cosine,
     })
     return out, {"processed": n_in, "predicted": len(out), "skipped": n_in - len(out)}
 
@@ -1049,12 +1046,20 @@ def stream_inference(
     out_schema = pa.schema([
         pa.field("zinc_id", pa.string()),
         pa.field("smiles", pa.string()),
+        # Legacy columns
         pa.field("prob", pa.float32()),
         pa.field("pred_label", pa.int8()),
-        pa.field("AD_Score", pa.float32()), 
+        pa.field("AD_Score", pa.float32()),
         pa.field("leverage", pa.float32()),
-        pa.field("max_tanimoto", pa.float32()), 
-        pa.field("max_cosine", pa.float32()),   
+        pa.field("max_tanimoto", pa.float32()),
+        pa.field("max_cosine", pa.float32()),
+        # Canonical columns
+        pa.field("qsar_prob", pa.float32()),
+        pa.field("qsar_pred_label", pa.int8()),
+        pa.field("ad_score", pa.float32()),
+        pa.field("ad_leverage", pa.float32()),
+        pa.field("ad_max_tanimoto", pa.float32()),
+        pa.field("ad_max_cosine", pa.float32()),
         pa.field("model_name", pa.string()),
         pa.field("seed", pa.int64()),
         pa.field("threshold_used", pa.float32()),

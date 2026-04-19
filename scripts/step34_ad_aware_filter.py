@@ -150,11 +150,23 @@ def load_merged_data(input_file: Path, logger: logging.Logger) -> pd.DataFrame:
         df = pd.read_parquet(input_file)
         pbar.update(100)
     
-    # Validate required columns
-    required_cols = {"zinc_id", "prob", "AD_Score"}
-    missing_cols = required_cols - set(df.columns)
-    if missing_cols:
-        raise ValueError(f"Missing required columns in input file: {missing_cols}")
+    # Validate required columns (support both legacy and canonical names)
+    required_id = {"zinc_id"}
+    prob_cols = ["qsar_prob", "prob"]
+    ad_cols = ["ad_score", "AD_Score", "AD_Score"]  # tolerate legacy
+
+    missing_id = required_id - set(df.columns)
+    if missing_id:
+        raise ValueError(f"Missing required columns in input file: {missing_id}")
+
+    prob_col = next((c for c in prob_cols if c in df.columns), None)
+    ad_col = next((c for c in ad_cols if c in df.columns), None)
+    if prob_col is None or ad_col is None:
+        raise ValueError(
+            "Missing required score columns in input file. "
+            f"Need one of {prob_cols} and one of {ad_cols}. "
+            f"Available columns: {list(df.columns)[:50]}"
+        )
 
     # Normalize zinc_id to string to prevent precision/format issues downstream.
     # (Upstream scripts should already do this, but step34 is a safety net.)
@@ -174,15 +186,21 @@ def load_merged_data(input_file: Path, logger: logging.Logger) -> pd.DataFrame:
     else:
         df["smiles"] = df["smiles"].astype("string")
 
+    # Canonicalize column names for downstream code.
+    if prob_col != "qsar_prob":
+        df["qsar_prob"] = pd.to_numeric(df[prob_col], errors="coerce")
+    if ad_col != "ad_score":
+        df["ad_score"] = pd.to_numeric(df[ad_col], errors="coerce")
+
     # Validate data types and ranges
-    prob_min, prob_max = df["prob"].min(), df["prob"].max()
+    prob_min, prob_max = df["qsar_prob"].min(), df["qsar_prob"].max()
     if prob_min < 0 or prob_max > 1:
         logger.warning(
             f"Probability values outside [0, 1] range detected: [{prob_min:.4f}, {prob_max:.4f}]. "
             "Consider checking calibration."
         )
     
-    ad_min, ad_max = df["AD_Score"].min(), df["AD_Score"].max()
+    ad_min, ad_max = df["ad_score"].min(), df["ad_score"].max()
     if ad_min < 0 or ad_max > 1:
         logger.warning(
             f"AD Score values outside [0, 1] range detected: [{ad_min:.4f}, {ad_max:.4f}]"
@@ -207,6 +225,8 @@ def apply_ad_shrinkage(prob: float, ad_score: float, ad_power: float) -> float:
     if pd.isna(ad_score) or ad_score <= 0:
         return 0.0
     
+    # Note: `ad_score` is already a powered (non-linear) AD score upstream (step22/step33).
+    # `ad_power` here is an additional shrink exponent, defaulting to 1.0.
     return prob * (ad_score ** ad_power)
 
 
@@ -229,7 +249,7 @@ def filter_and_score_data(df: pd.DataFrame, ad_power: float, ad_threshold: float
     
     # Apply AD threshold filtering
     initial_count = len(df)
-    df_filtered = df[df["AD_Score"] >= ad_threshold].copy()
+    df_filtered = df[df["ad_score"] >= ad_threshold].copy()
     filtered_count = len(df_filtered)
     
     retention_rate = filtered_count / initial_count if initial_count > 0 else 0
@@ -241,14 +261,23 @@ def filter_and_score_data(df: pd.DataFrame, ad_power: float, ad_threshold: float
     # Calculate final scores
     with tqdm(total=100, desc="Calculating scores", unit="%") as pbar:
         if use_shrinkage:
-            df_filtered["Final_Score"] = df_filtered.apply(
-                lambda row: apply_ad_shrinkage(row["prob"], row["AD_Score"], ad_power), 
+            df_filtered["qsar_ad_rank_score_raw"] = df_filtered.apply(
+                lambda row: apply_ad_shrinkage(row["qsar_prob"], row["ad_score"], ad_power),
                 axis=1
             )
         else:
             # Fallback: use probability only
-            df_filtered["Final_Score"] = df_filtered["prob"]
+            df_filtered["qsar_ad_rank_score_raw"] = df_filtered["qsar_prob"]
         pbar.update(100)
+
+    # Pretty normalization to [0, 1] for downstream ranking/plotting.
+    raw = pd.to_numeric(df_filtered["qsar_ad_rank_score_raw"], errors="coerce")
+    vmin = float(raw.min()) if len(raw) else 0.0
+    vmax = float(raw.max()) if len(raw) else 1.0
+    if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
+        df_filtered["qsar_ad_rank_score"] = ((raw - vmin) / (vmax - vmin)).astype("float32")
+    else:
+        df_filtered["qsar_ad_rank_score"] = 0.0
     
     return df_filtered
 
@@ -270,7 +299,7 @@ def rank_and_select_candidates(df: pd.DataFrame, top_n: Optional[int],
     logger.info("Ranking candidates by final score...")
     
     # Sort by final score (descending)
-    ranked_df = df.sort_values("Final_Score", ascending=False).reset_index(drop=True)
+    ranked_df = df.sort_values("qsar_ad_rank_score_raw", ascending=False).reset_index(drop=True)
     
     # Select top candidates
     if top_n is not None:
@@ -314,12 +343,12 @@ def generate_summary(ranked_df: pd.DataFrame, top_candidates: pd.DataFrame,
         top_100 = top_candidates.head(100)
         
         summary.update({
-            "top_100_mean_final_score": float(top_100["Final_Score"].mean()),
-            "top_100_mean_prob": float(top_100["prob"].mean()),
-            "top_100_mean_ad_score": float(top_100["AD_Score"].mean()),
-            "overall_mean_final_score": float(ranked_df["Final_Score"].mean()),
-            "overall_mean_prob": float(ranked_df["prob"].mean()),
-            "overall_mean_ad_score": float(ranked_df["AD_Score"].mean()),
+            "top_100_mean_qsar_ad_rank_score_raw": float(top_100["qsar_ad_rank_score_raw"].mean()),
+            "top_100_mean_qsar_prob": float(top_100["qsar_prob"].mean()),
+            "top_100_mean_ad_score": float(top_100["ad_score"].mean()),
+            "overall_mean_qsar_ad_rank_score_raw": float(ranked_df["qsar_ad_rank_score_raw"].mean()),
+            "overall_mean_qsar_prob": float(ranked_df["qsar_prob"].mean()),
+            "overall_mean_ad_score": float(ranked_df["ad_score"].mean()),
             })
     
     return summary
@@ -383,11 +412,11 @@ def print_console_summary(summary: Dict, logger: logging.Logger) -> None:
     logger.info(f"Total molecules processed: {summary['total_molecules']:,}")
     logger.info(f"Candidates selected: {summary['candidates_selected']:,}")
     
-    if 'top_100_mean_final_score' in summary:
-        logger.info(f"Top 100 mean final score: {summary['top_100_mean_final_score']:.4f}")
-        logger.info(f"Top 100 mean probability: {summary['top_100_mean_prob']:.4f}")
-        logger.info(f"Top 100 mean AD score: {summary['top_100_mean_ad_score']:.4f}")
-        logger.info(f"Overall mean final score: {summary['overall_mean_final_score']:.4f}")
+    if 'top_100_mean_qsar_ad_rank_score_raw' in summary:
+        logger.info(f"Top 100 mean rank score (raw): {summary['top_100_mean_qsar_ad_rank_score_raw']:.4f}")
+        logger.info(f"Top 100 mean qsar_prob: {summary['top_100_mean_qsar_prob']:.4f}")
+        logger.info(f"Top 100 mean ad_score: {summary['top_100_mean_ad_score']:.4f}")
+        logger.info(f"Overall mean rank score (raw): {summary['overall_mean_qsar_ad_rank_score_raw']:.4f}")
     
     logger.info("=" * 60)
 
@@ -410,8 +439,15 @@ def main() -> None:
                                 help="Percentage of top candidates to select (e.g., 0.1 for top 0.1%)")
     
     # Optional parameters with defaults
-    parser.add_argument("--ad-power", type=float, default=2.0,
-                       help="Power parameter for AD score scaling (default: 2.0)")
+    parser.add_argument(
+        "--ad-power",
+        type=float,
+        default=1.0,
+        help=(
+            "Additional power exponent applied during AD-aware shrinkage in step34 (default: 1.0). "
+            "Note: ad_score is already non-linearly powered upstream (step22/step33)."
+        ),
+    )
     parser.add_argument("--ad-threshold", type=float, default=0.3,
                        help="Minimum AD score threshold (default: 0.3)")
     parser.add_argument("--use-shrinkage", action=argparse.BooleanOptionalAction, default=True,
@@ -483,7 +519,7 @@ if __name__ == "__main__":
 
 
 # %%
-# Plotting-only cell (interactive)
+    # Plotting-only cell (interactive)
 ##############################################################################
 # Goal:
 #   - Visualize AD-aware screening results WITHOUT recomputation
@@ -541,32 +577,32 @@ if _in_ipython():
 
     # A. Distribution diagnostics
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    for ax, col, color in zip(axes, ["prob", "AD_Score", "Final_Score"], ["#440154", "#21918c", "#fde725"]):
+    for ax, col, color in zip(axes, ["qsar_prob", "ad_score", "qsar_ad_rank_score_raw"], ["#440154", "#21918c", "#fde725"]):
         sns.histplot(df[col], bins=50, kde=True, ax=ax, color=color, edgecolor='none')
         ax.set_title(f"Distribution: {col}")
     _save(fig, "fig1_distribution", fig_dir)
 
-    # B. Relationship: Prob vs AD_Score
+    # B. Relationship: qsar_prob vs ad_score
     fig, ax = plt.subplots(figsize=(6, 5))
-    sc = ax.scatter(df["prob"], df["AD_Score"], c=df["Final_Score"], cmap="viridis", s=10, alpha=0.5)
-    plt.colorbar(sc, label="Final_Score")
+    sc = ax.scatter(df["qsar_prob"], df["ad_score"], c=df["qsar_ad_rank_score_raw"], cmap="viridis", s=10, alpha=0.5)
+    plt.colorbar(sc, label="qsar_ad_rank_score_raw")
     ax.set_xlabel("Probability (Prob)")
-    ax.set_ylabel("AD_Score")
+    ax.set_ylabel("ad_score")
     ax.set_title("AD-Aware Scoring Landscape")
     _save(fig, "fig2_prob_vs_ad", fig_dir)
 
     # C. Ranking Behavior
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(df.index, df["Final_Score"], lw=2, color='black')
+    ax.plot(df.index, df["qsar_ad_rank_score_raw"], lw=2, color='black')
     ax.set_xlabel("Rank")
-    ax.set_ylabel("Final_Score")
+    ax.set_ylabel("qsar_ad_rank_score_raw")
     ax.set_title("Screening Ranking Curve")
     _save(fig, "fig3_ranking_curve", fig_dir)
 
     # D. AD Impact (Overlap Analysis)
     top_n_list = [100, 500, 1000]
     overlap_ratios = []
-    prob_ranked = df.sort_values("prob", ascending=False).index.tolist()
+    prob_ranked = df.sort_values("qsar_prob", ascending=False).index.tolist()
     final_ranked = df.index.tolist()
     
     for n in top_n_list:
@@ -579,12 +615,12 @@ if _in_ipython():
     ax.bar([f"Top-{n}" for n in top_n_list], overlap_ratios, color="#3b528b")
     ax.set_ylim(0, 1)
     ax.set_ylabel("Overlap Ratio")
-    ax.set_title("Ranking Shift: Prob vs Final_Score")
+    ax.set_title("Ranking Shift: qsar_prob vs rank score")
     _save(fig, "fig4_overlap", fig_dir)
 
     # E. Top Candidate Bias
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    for ax, col in zip(axes, ["prob", "AD_Score"]):
+    for ax, col in zip(axes, ["qsar_prob", "ad_score"]):
         sns.kdeplot(df[col], ax=ax, label="All", fill=True, alpha=0.3)
         sns.kdeplot(top_df[col], ax=ax, label="Top Hits", fill=True, alpha=0.3)
         ax.legend()
@@ -592,7 +628,7 @@ if _in_ipython():
     _save(fig, "fig5_top_bias", fig_dir)
 
     # F. Chemical Space (PCA)
-    features = [c for c in df.columns if c.startswith('morgan_') or c in ['AD_Score', 'prob']]
+    features = [c for c in df.columns if c.startswith('morgan_') or c in ['ad_score', 'qsar_prob']]
     if len(features) > 10:
         pca = PCA(n_components=2)
         X_all = pca.fit_transform(df[features].fillna(0))
