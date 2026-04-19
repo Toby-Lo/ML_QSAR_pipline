@@ -57,8 +57,8 @@ python scripts/step33_vs_inference.py \
   --calibration isotonic \
   --threshold auto \
   --threshold_metric mcc \
-  --input ./docking/9CVD/a1a0m_final.parquet \
-  --output ./docking/9CVD/a1a0m_final_inference_result.parquet \
+  --input ./models_out/qsar_ml_20260412_162829/virtual_screening/A1A0M_inference/A1A0M_feature.parquet \
+  --output ./models_out/qsar_ml_20260412_162829/virtual_screening/A1A0M_inference/A1A0M_inference_result.parquet \
   --ad_integration
 
 python scripts/step33_vs_inference.py \
@@ -670,14 +670,14 @@ def select_required_input_columns(parquet_schema_names: List[str], plan: Feature
             break
     
     if id_col:
-        logger.info(f"âœ… Found ID column: '{id_col}' (will be mapped to 'zinc_id')")
+        logger.info(f"✓ Found ID column: '{id_col}' (will be mapped to 'zinc_id')")
     else:
-        logger.error(f"âŒ CRITICAL: No ID column found. Looked for: {possible_id_names}")
+        logger.error(f"✗ CRITICAL: No ID column found. Looked for: {possible_id_names}")
         raise KeyError(f"Input parquet must contain an ID column. Available: {available_columns[:20]}")
 
     # 2. Check that the SMILES column is available.
     if "smiles" not in names_set:
-        logger.error("âŒ CRITICAL: 'smiles' column missing!")
+        logger.error("✗ CRITICAL: 'smiles' column missing!")
         raise KeyError("Input parquet must contain a 'smiles' column for AD/Inference.")
 
     required_cols_set = {id_col, "smiles"}
@@ -691,11 +691,11 @@ def select_required_input_columns(parquet_schema_names: List[str], plan: Feature
             required_cols_set.add(col)
     
     if missing_fps:
-        logger.error(f"âŒ CRITICAL: {len(missing_fps)} fingerprint columns missing!")
+        logger.error(f"✗ CRITICAL: {len(missing_fps)} fingerprint columns missing!")
         logger.error(f"First few missing: {missing_fps[:5]}")
         raise KeyError(f"Missing required fingerprint column: {missing_fps[0]}")
     else:
-        logger.info(f"âœ… All {len(plan.fp_input_columns)} fingerprint columns present.")
+        logger.info(f"✓ All {len(plan.fp_input_columns)} fingerprint columns present.")
 
     # 4. Validate descriptor columns.
     missing_descs = []
@@ -706,11 +706,11 @@ def select_required_input_columns(parquet_schema_names: List[str], plan: Feature
             required_cols_set.add(feat)
             
     if missing_descs:
-        logger.error(f"âŒ CRITICAL: {len(missing_descs)} descriptor columns missing!")
+        logger.error(f"✗ CRITICAL: {len(missing_descs)} descriptor columns missing!")
         logger.error(f"First few missing: {missing_descs[:5]}")
         raise KeyError(f"Missing required descriptor column: {missing_descs[0]}")
     else:
-        logger.info(f"âœ… All {len(plan.descriptor_names)} descriptor columns present.")
+        logger.info(f"✓ All {len(plan.descriptor_names)} descriptor columns present.")
 
     logger.info("SCHEMA VALIDATION PASSED.")
     logger.info("="*50)
