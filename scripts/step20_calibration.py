@@ -4,8 +4,11 @@ Usage:
   python scripts/step20_calibration.py \
     --run-dir models_out/qsar_ml_20260412_162829 \
     --input ./data/NSD2/nsd2_final_dataset_feature_fingerprint.csv \
+    --split-seeds 12345 \
     --methods both \
-    --calibration-source dev
+    --calibration-source dev \
+    --models SVC \
+    --no-plots
 
 This will read the trained models from the specified run directory
 split_seed_*/models/full_dev/{MODEL}/seed_{seed}/model.joblib
@@ -16,6 +19,13 @@ split_seed_*/predictions/cv_predictions_fold_*.csv
 
 options: 
     method="sigmoid"; "isotonic"; or "both" 
+
+If you want to ONLY plot the calibration curves, use the following command:
+python scripts/step20_calibration.py \
+  --run-dir models_out/qsar_ml_20260412_162829 \
+  --plot-only \
+  --split-seed 12345 \
+  --model SVC
 """
 
 # %%
@@ -78,18 +88,22 @@ USER_CONFIG: Dict[str, Any] = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calibrate trained QSAR models from step10 outputs")
-    parser.add_argument("--run-dir", type=Path, required=True, help="Run directory from step10 (contains split_seed_*)")
-    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet used by step10")
+    parser.add_argument("--run-dir", type=Path, help="Run directory from step10 (contains split_seed_*)")
+    parser.add_argument("--input", type=Path, help="Input CSV/Parquet used by step10")
     parser.add_argument("--methods", choices=["sigmoid", "isotonic", "both"], default="both")
     parser.add_argument("--calibration-source", choices=["dev", "external"], default="dev")
     parser.add_argument("--cv-folds", type=int, default=5, help="Grouped CV folds for calibration")
     parser.add_argument("--split-seeds", help="Comma-separated seeds; default auto-detect from run-dir")
+    parser.add_argument("--models", help="Comma-separated model keys under models/full_dev (e.g. SVC,RF)")
     parser.add_argument("--id-column", default="id")
     parser.add_argument("--smiles-column", default="smiles")
     parser.add_argument("--label-column", default="label")
     parser.add_argument("--bins", type=int, default=10, help="Number of bins for reliability curve")
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--no-plots", action="store_true", help="Skip writing reliability plot figures")
+    parser.add_argument("--plot-only", action="store_true", help="Only render calibration composite plot from existing outputs")
+    parser.add_argument("--split-seed", type=int, help="Single split seed for --plot-only")
+    parser.add_argument("--model", help="Model key (e.g., SVC) for --plot-only")
     return parser.parse_args()
 
 
@@ -250,11 +264,178 @@ def calibrate_one_model(model,
     return calibrated
 
 
+def plot_calibration_composite(run_dir: Path, split_seed: int, model_key: str, dpi: int = 600) -> Tuple[Path, Path]:
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Cambria", "Times New Roman", "DejaVu Serif"],
+            "font.size": 11,
+            "figure.dpi": dpi,
+            "savefig.dpi": dpi,
+            "axes.linewidth": 1.2,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.linestyle": ":",
+            "grid.alpha": 0.25,
+        }
+    )
+
+    curve_sig_path = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "method_sigmoid" / "calibration_curve.csv"
+    curve_iso_path = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "method_isotonic" / "calibration_curve.csv"
+    probs_sig_path = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "method_sigmoid" / "per_sample_probs.csv"
+    probs_iso_path = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "method_isotonic" / "per_sample_probs.csv"
+    metrics_sig_path = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "method_sigmoid" / "calibration_metrics.json"
+    metrics_iso_path = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "method_isotonic" / "calibration_metrics.json"
+
+    required_paths = [curve_sig_path, curve_iso_path, probs_sig_path, probs_iso_path, metrics_sig_path, metrics_iso_path]
+    missing = [p for p in required_paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError("Missing calibration outputs:\n" + "\n".join(str(p) for p in missing))
+
+    curve_sig = pd.read_csv(curve_sig_path)
+    curve_iso = pd.read_csv(curve_iso_path)
+    prob_sig = pd.read_csv(probs_sig_path)
+    prob_iso = pd.read_csv(probs_iso_path)
+    met_sig = json.loads(metrics_sig_path.read_text())
+    met_iso = json.loads(metrics_iso_path.read_text())
+
+    raw_prob = pd.to_numeric(prob_sig["raw_prob"], errors="coerce").to_numpy()
+    platt_prob = pd.to_numeric(prob_sig["cal_prob"], errors="coerce").to_numpy()
+    iso_prob = pd.to_numeric(prob_iso["cal_prob"], errors="coerce").to_numpy()
+    y_true = pd.to_numeric(prob_sig["y_true"], errors="coerce").to_numpy()
+    valid = ~(np.isnan(raw_prob) | np.isnan(platt_prob) | np.isnan(iso_prob) | np.isnan(y_true))
+    raw_prob, platt_prob, iso_prob, y_true = raw_prob[valid], platt_prob[valid], iso_prob[valid], y_true[valid]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.5))
+    ax_a, ax_b, ax_c, ax_d = axes.flatten()
+    color_raw, color_platt, color_iso = "#4C72B0", "#C44E52", "#55A868"
+
+    ax_a.plot([0, 1], [0, 1], linestyle="--", color="0.5", linewidth=1.2, label="Perfect calibration")
+    ax_a.plot(curve_sig["mean_pred_raw"], curve_sig["frac_pos_raw"], "o-", color=color_raw, linewidth=1.3, markersize=4, label="Raw")
+    ax_a.plot(curve_sig["mean_pred_cal"], curve_sig["frac_pos_cal"], "o-", color=color_platt, linewidth=1.8, markersize=4.5, label="Platt")
+    ax_a.plot(curve_iso["mean_pred_cal"], curve_iso["frac_pos_cal"], "o-", color=color_iso, linewidth=1.8, markersize=4.5, label="Isotonic")
+    ax_a.set_title("(A) Reliability diagram")
+    ax_a.set_xlabel("Mean predicted probability")
+    ax_a.set_ylabel("Fraction of positives")
+    ax_a.set_xlim(0, 1)
+    ax_a.set_ylim(0, 1.02)
+    ax_a.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="lower right")
+
+    bins = np.linspace(0.0, 1.0, 21)
+    ax_b.hist(raw_prob, bins=bins, density=True, alpha=0.35, color=color_raw, edgecolor="black", linewidth=0.55, label="Raw")
+    ax_b.hist(platt_prob, bins=bins, density=True, alpha=0.35, color=color_platt, edgecolor="black", linewidth=0.55, label="Platt")
+    ax_b.hist(iso_prob, bins=bins, density=True, alpha=0.35, color=color_iso, edgecolor="black", linewidth=0.55, label="Isotonic")
+    ax_b.set_title("(B) Probability histogram")
+    ax_b.set_xlabel("Predicted probability")
+    ax_b.set_ylabel("Density")
+    ax_b.set_xlim(0, 1)
+    ax_b.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="upper center", ncol=3)
+
+    brier_vals = [float(met_sig.get("brier_raw", np.nan)), float(met_sig.get("brier_calibrated", np.nan)), float(met_iso.get("brier_calibrated", np.nan))]
+    bars = ax_c.bar(["Raw", "Platt", "Isotonic"], brier_vals, color=[color_raw, color_platt, color_iso], edgecolor="black", linewidth=0.9)
+    y_top = 0.05
+    y_pad = 0.002
+    ax_c.set_ylim(0.0, y_top)
+    for bar, value in zip(bars, brier_vals):
+        ax_c.text(bar.get_x() + bar.get_width() / 2.0, float(value) + y_pad * 0.35, f"{value:.3f}", ha="center", va="bottom")
+    ax_c.set_title("(C) Brier score comparison")
+    ax_c.set_ylabel("Brier score (lower is better)")
+
+    err_df = pd.DataFrame({"Raw": np.abs(raw_prob - y_true), "Platt": np.abs(platt_prob - y_true), "Isotonic": np.abs(iso_prob - y_true)})
+    parts = ax_d.violinplot([err_df["Raw"], err_df["Platt"], err_df["Isotonic"]], showmeans=False, showmedians=True, widths=0.75)
+    for body, color in zip(parts["bodies"], [color_raw, color_platt, color_iso]):
+        body.set_facecolor(color)
+        body.set_edgecolor("black")
+        body.set_alpha(0.55)
+    if "cmedians" in parts:
+        parts["cmedians"].set_color("black")
+        parts["cmedians"].set_linewidth(1.1)
+    ax_d.set_xticks([1, 2, 3])
+    ax_d.set_xticklabels(["Raw", "Platt", "Isotonic"])
+    ax_d.set_title("(D) Calibration error distribution")
+    ax_d.set_ylabel(r"$|p - y|$")
+    ax_d.set_ylim(0, 1)
+
+    for ax in [ax_a, ax_b, ax_c, ax_d]:
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1.2)
+
+    fig.suptitle(
+        f"Probability Calibration Analysis (Split {split_seed}, {model_key})",
+        y=1.02,
+        fontsize=18,
+        fontweight="bold",
+)
+
+    plt.tight_layout()
+    out_dir = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "composite_plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_png = out_dir / "calibration_composite_2x2.png"
+    out_svg = out_dir / "calibration_composite_2x2.svg"
+    fig.savefig(out_png, dpi=dpi, bbox_inches="tight")
+    fig.savefig(out_svg, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return out_png, out_svg
+
+
+def compute_calibration_errors(
+    y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10
+) -> Dict[str, float]:
+    y_true = np.asarray(y_true).astype(float)
+    y_prob = np.asarray(y_prob).astype(float)
+    n = len(y_true)
+    if n == 0:
+        return {"ece": float("nan"), "mce": float("nan")}
+
+    # Equal-width bins on [0, 1]
+    edges = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1)
+    # Include 1.0 in the last bin
+    bin_ids = np.clip(np.digitize(y_prob, edges, right=False) - 1, 0, len(edges) - 2)
+
+    ece = 0.0
+    mce = 0.0
+    for b in range(len(edges) - 1):
+        mask = bin_ids == b
+        if not np.any(mask):
+            continue
+        conf = float(np.mean(y_prob[mask]))
+        acc = float(np.mean(y_true[mask]))
+        err = abs(acc - conf)
+        w = float(np.sum(mask)) / float(n)
+        ece += w * err
+        mce = max(mce, err)
+    return {"ece": float(ece), "mce": float(mce)}
+
+
 def main() -> None:
     args = parse_args()
+    if args.run_dir is None:
+        raise ValueError("--run-dir is required")
+
+    if args.plot_only:
+        if args.split_seed is None or not args.model:
+            raise ValueError("--plot-only requires --split-seed and --model")
+        out_png, out_svg = plot_calibration_composite(
+            run_dir=args.run_dir,
+            split_seed=int(args.split_seed),
+            model_key=str(args.model),
+            dpi=600,
+        )
+        print(f"[DONE] Saved to:\n  {out_png}\n  {out_svg}")
+        return
+
+    if args.input is None:
+        raise ValueError("--input is required unless --plot-only is set")
+
     run_dir = args.run_dir
     logger = setup_logger(run_dir)
     methods = ["sigmoid", "isotonic"] if args.methods == "both" else [args.methods]
+    selected_models = None
+    if args.models:
+        selected_models = {x.strip() for x in args.models.split(",") if x.strip()}
 
     if args.split_seeds:
         seeds = [int(x) for x in args.split_seeds.split(",") if x.strip()]
@@ -314,6 +495,8 @@ def main() -> None:
         model_roots = sorted([p for p in (split_dir / "models" / "full_dev").glob("*") if p.is_dir()])
         for model_root in model_roots:
             model_key = model_root.name
+            if selected_models is not None and model_key not in selected_models:
+                continue
             model_dir = model_root / f"seed_{split_seed}"
             if not model_dir.exists():
                 continue
@@ -391,7 +574,50 @@ def main() -> None:
                     "brier_calibrated": cal_brier,
                     "brier_improvement": raw_brier - cal_brier,
                 }
+                raw_err = compute_calibration_errors(y_cal, raw_prob, n_bins=args.bins)
+                cal_err = compute_calibration_errors(y_cal, cal_prob, n_bins=args.bins)
+                metrics.update(
+                    {
+                        "ece_raw": raw_err["ece"],
+                        "ece_calibrated": cal_err["ece"],
+                        "ece_improvement": raw_err["ece"] - cal_err["ece"],
+                        "mce_raw": raw_err["mce"],
+                        "mce_calibrated": cal_err["mce"],
+                        "mce_improvement": raw_err["mce"] - cal_err["mce"],
+                    }
+                )
                 (calib_out_dir / "calibration_metrics.json").write_text(json.dumps(metrics, indent=2))
+                ece_metrics = {
+                    "split_seed": split_seed,
+                    "model": model_key,
+                    "method": method,
+                    "calibration_source": args.calibration_source,
+                    "n_bins": int(args.bins),
+                    "raw": raw_err,
+                    "calibrated": cal_err,
+                    "improvement": {
+                        "ece": raw_err["ece"] - cal_err["ece"],
+                        "mce": raw_err["mce"] - cal_err["mce"],
+                    },
+                }
+                (calib_out_dir / "ece_metrics.json").write_text(json.dumps(ece_metrics, indent=2))
+
+                per_sample_df = pd.DataFrame(
+                    {
+                        args.id_column: df.iloc[cal_indices][args.id_column].to_numpy()
+                        if args.id_column in df.columns
+                        else cal_indices,
+                        "smiles": np.array(smiles_cal, dtype=object),
+                        "y_true": y_cal.astype(int),
+                        "raw_prob": raw_prob.astype(float),
+                        "cal_prob": cal_prob.astype(float),
+                        "split_seed": split_seed,
+                        "model": model_key,
+                        "method": method,
+                        "calibration_source": args.calibration_source,
+                    }
+                )
+                per_sample_df.to_csv(calib_out_dir / "per_sample_probs.csv", index=False)
                 joblib.dump(calibrated, calib_out_dir / "calibrated_model.joblib")
                 summary_rows.append(metrics)
                 logger.info(
@@ -431,6 +657,7 @@ except Exception:
     _IN_IPYTHON = False
 
 if _IN_IPYTHON:
+    import json
     from pathlib import Path
     from typing import Any, Dict
 
@@ -439,7 +666,7 @@ if _IN_IPYTHON:
     from matplotlib import pyplot as plt
 
     PLOT_STYLE: Dict[str, Any] = {
-        "font_family": "Cambria", # Cambria, Times New Roman
+        "font_family": "Cambria", # Times New Roman
         "font_size": 11,
         "dpi": 600,
         "grid_alpha": 0.25,
@@ -466,80 +693,136 @@ if _IN_IPYTHON:
     RUN_DIR = Path("../models_out/qsar_ml_20260412_162829") ### Relative path if run in IDE
     SPLIT_SEED = 12345  ### adjust
     MODEL_KEY = "SVC"   ### adjust
-    METHOD = "sigmoid"  # sigmoid | isotonic
+    METHODS = ("sigmoid", "isotonic")
 
-    CURVE_CSV = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{METHOD}" / "calibration_curve.csv"
-    if not CURVE_CSV.exists():
-        raise FileNotFoundError(f"Missing calibration curve CSV: {CURVE_CSV}")
+    def _load_curve(method: str) -> pd.DataFrame:
+        curve_path = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{method}" / "calibration_curve.csv"
+        if not curve_path.exists():
+            raise FileNotFoundError(f"Missing calibration curve CSV: {curve_path}")
+        curve_df = pd.read_csv(curve_path)
+        required_cols = {"mean_pred_raw", "frac_pos_raw", "mean_pred_cal", "frac_pos_cal"}
+        if not required_cols.issubset(curve_df.columns):
+            raise ValueError(f"calibration_curve.csv missing columns in {curve_path}")
+        return curve_df
 
-    curve = pd.read_csv(CURVE_CSV)
+    def _load_probs(method: str) -> pd.DataFrame:
+        prob_path = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{method}" / "per_sample_probs.csv"
+        if not prob_path.exists():
+            raise FileNotFoundError(f"Missing per_sample_probs.csv: {prob_path}")
+        prob_df = pd.read_csv(prob_path)
+        required_cols = {"y_true", "raw_prob", "cal_prob"}
+        if not required_cols.issubset(prob_df.columns):
+            raise ValueError(f"per_sample_probs.csv missing columns in {prob_path}")
+        return prob_df
 
-    required = {"mean_pred_raw", "frac_pos_raw", "mean_pred_cal", "frac_pos_cal"}
-    missing = required - set(curve.columns)
-    if missing:
-        raise ValueError(f"calibration_curve.csv missing columns: {sorted(missing)}")
+    def _load_metrics(method: str) -> Dict[str, float]:
+        metrics_path = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / f"method_{method}" / "calibration_metrics.json"
+        if not metrics_path.exists():
+            raise FileNotFoundError(f"Missing calibration_metrics.json: {metrics_path}")
+        metrics_raw = json.loads(metrics_path.read_text())
+        return {k: float(v) for k, v in metrics_raw.items() if isinstance(v, (int, float))}
 
-    fig, ax = plt.subplots(figsize=(4.2, 4.2))
-    # Perfect calibration line
-    ax.plot(
-        [0, 1], [0, 1],
-        linestyle="--",
-        color="0.6",
-        linewidth=1.2,
-        label="Perfect calibration",
-        zorder=1
+    curve_sig = _load_curve("sigmoid")
+    curve_iso = _load_curve("isotonic")
+    prob_sig = _load_probs("sigmoid")
+    prob_iso = _load_probs("isotonic")
+    met_sig = _load_metrics("sigmoid")
+    met_iso = _load_metrics("isotonic")
+
+    raw_prob = pd.to_numeric(prob_sig["raw_prob"], errors="coerce").to_numpy()
+    platt_prob = pd.to_numeric(prob_sig["cal_prob"], errors="coerce").to_numpy()
+    iso_prob = pd.to_numeric(prob_iso["cal_prob"], errors="coerce").to_numpy()
+    y_true = pd.to_numeric(prob_sig["y_true"], errors="coerce").to_numpy()
+    valid = ~(np.isnan(raw_prob) | np.isnan(platt_prob) | np.isnan(iso_prob) | np.isnan(y_true))
+    raw_prob = raw_prob[valid]
+    platt_prob = platt_prob[valid]
+    iso_prob = iso_prob[valid]
+    y_true = y_true[valid]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.5))
+    ax_a, ax_b, ax_c, ax_d = axes.flatten()
+    color_raw = "#4C72B0"
+    color_platt = "#C44E52"
+    color_iso = "#55A868"
+
+    # (A) Reliability diagram
+    ax_a.plot([0, 1], [0, 1], linestyle="--", color="0.5", linewidth=1.2, label="Perfect calibration")
+    ax_a.plot(curve_sig["mean_pred_raw"], curve_sig["frac_pos_raw"], "o-", color=color_raw, linewidth=1.3, markersize=4, label="Raw")
+    ax_a.plot(curve_sig["mean_pred_cal"], curve_sig["frac_pos_cal"], "o-", color=color_platt, linewidth=1.8, markersize=4.5, label="Platt")
+    ax_a.plot(curve_iso["mean_pred_cal"], curve_iso["frac_pos_cal"], "o-", color=color_iso, linewidth=1.8, markersize=4.5, label="Isotonic")
+    ax_a.set_title("(A) Reliability diagram")
+    ax_a.set_xlabel("Mean predicted probability")
+    ax_a.set_ylabel("Fraction of positives")
+    ax_a.set_xlim(0, 1)
+    ax_a.set_ylim(0, 1.02)
+    ax_a.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="lower right")
+
+    # (B) Probability histogram
+    bins = np.linspace(0.0, 1.0, 21)
+    ax_b.hist(raw_prob, bins=bins, density=True, alpha=0.35, color=color_raw, edgecolor="black", linewidth=0.55, label="Raw")
+    ax_b.hist(platt_prob, bins=bins, density=True, alpha=0.35, color=color_platt, edgecolor="black", linewidth=0.55, label="Platt")
+    ax_b.hist(iso_prob, bins=bins, density=True, alpha=0.35, color=color_iso, edgecolor="black", linewidth=0.55, label="Isotonic")
+    ax_b.set_title("(B) Probability histogram")
+    ax_b.set_xlabel("Predicted probability")
+    ax_b.set_ylabel("Density")
+    ax_b.set_xlim(0, 1)
+    ax_b.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="upper center", ncol=3)
+
+    # (C) Brier score comparison
+    brier_vals = [met_sig.get("brier_raw", np.nan), met_sig.get("brier_calibrated", np.nan), met_iso.get("brier_calibrated", np.nan)]
+    bar_labels = ["Raw", "Platt", "Isotonic"]
+    bars = ax_c.bar(bar_labels, brier_vals, color=[color_raw, color_platt, color_iso], edgecolor="black", linewidth=0.9)
+    brier_max = float(np.nanmax(np.asarray(brier_vals, dtype=float)))
+    y_pad = max(0.01, brier_max * 0.06)
+    ax_c.set_ylim(0.0, brier_max + y_pad * 2.2)
+    for bar, value in zip(bars, brier_vals):
+        ax_c.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            float(value) + y_pad * 0.35,
+            f"{value:.3f}",
+            ha="center",
+            va="bottom",
+        )
+    ax_c.set_title("(C) Brier score comparison")
+    ax_c.set_ylabel("Brier score (lower is better)")
+
+    # (D) Calibration error distribution
+    err_df = pd.DataFrame(
+        {
+            "Raw": np.abs(raw_prob - y_true),
+            "Platt": np.abs(platt_prob - y_true),
+            "Isotonic": np.abs(iso_prob - y_true),
+        }
     )
+    parts = ax_d.violinplot([err_df["Raw"], err_df["Platt"], err_df["Isotonic"]], showmeans=False, showmedians=True, widths=0.75)
+    for body, color in zip(parts["bodies"], [color_raw, color_platt, color_iso]):
+        body.set_facecolor(color)
+        body.set_edgecolor("black")
+        body.set_alpha(0.55)
+    if "cmedians" in parts:
+        parts["cmedians"].set_color("black")
+        parts["cmedians"].set_linewidth(1.1)
+    ax_d.set_xticks([1, 2, 3])
+    ax_d.set_xticklabels(["Raw", "Platt", "Isotonic"])
+    ax_d.set_title("(D) Calibration error distribution")
+    ax_d.set_ylabel(r"$|p - y|$")
+    ax_d.set_ylim(0, 1)
 
-    # Raw
-    ax.plot(
-        curve["mean_pred_raw"],
-        curve["frac_pos_raw"],
-        linestyle="-",
-        linewidth=1.2,
-        marker="o",
-        markersize=4,
-        markerfacecolor="white",
-        markeredgewidth=1.0,
-        color="#4C72B0",
-        alpha=0.8,
-        label="Uncalibrated",
-        zorder=2
-    )
+    for ax in [ax_a, ax_b, ax_c, ax_d]:
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(PLOT_STYLE["axes_linewidth"])
 
-    # Calibrated
-    ax.plot(
-        curve["mean_pred_cal"],
-        curve["frac_pos_cal"],
-        linestyle="-",
-        linewidth=2.0,
-        marker="o",
-        markersize=4.5,
-        color="#C44E52",
-        label=f"Calibrated ({METHOD})",
-        zorder=3
-    )
-
-    # Axis refinement
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-
-    ax.set_xlabel("Predicted probability")
-    ax.set_ylabel("Observed frequency")
-
-    # 去掉冗余标题?
-    # ax.set_title(...)
-
-    ax.legend(frameon=False)
-
+    fig.suptitle(f"Probability Calibration Analysis (split {SPLIT_SEED}, {MODEL_KEY})", y=1.01)
     plt.tight_layout()
 
-    # Save (PNG + SVG)
-    out_base = CURVE_CSV.parent / "reliability_plot"
-
-    fig.savefig(out_base.with_suffix(".png"))
-    fig.savefig(out_base.with_suffix(".svg"))
-
+    out_dir = RUN_DIR / f"split_seed_{SPLIT_SEED}" / "calibration" / MODEL_KEY / "composite_plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_png = out_dir / "calibration_composite_2x2.png"
+    out_svg = out_dir / "calibration_composite_2x2.svg"
+    fig.savefig(out_png, dpi=PLOT_STYLE["dpi"], bbox_inches="tight")
+    fig.savefig(out_svg, dpi=PLOT_STYLE["dpi"], bbox_inches="tight")
     plt.show()
-
-    print(f"[DONE] Saved to:\n  {out_base}.png\n  {out_base}.svg")
+    print(f"[DONE] Saved to:\n  {out_png}\n  {out_svg}")
 # %%

@@ -27,6 +27,20 @@ Structure:
 python scripts/step24_interpretations_linear.py \
   --run-dir models_out/qsar_ml_20260410_124055 \
   --split-seed 12345
+
+python scripts/step24_interpretations_linear.py \
+  --run-dir models_out/qsar_ml_20260412_162829 \
+  --split-seed 12345 \
+  --models SVC \
+  --fp-top-k 20
+
+Plots only
+python scripts/step24_interpretations_linear.py \
+  --run-dir models_out/qsar_ml_20260412_162829 \
+  --split-seed 12345 \
+  --plot-only \
+  --plot-model SVC
+
 """
 
 # %%
@@ -40,6 +54,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
 try:
     import joblib  # type: ignore
@@ -96,6 +112,9 @@ class ShapConfig:
     feature_name_mode: str = "raw"
     kernel_background_samples: int = 100
     output_dir: Optional[Path] = None
+    fp_top_k: int = 20
+    fp_radius: int = 2
+    fp_nbits: int = 2048
 
 
 def _resolve_split_dir(run_dir: Path, split_seed: int) -> Path:
@@ -206,6 +225,121 @@ def _sample_background(X_bg: pd.DataFrame, n: int, random_state: int) -> pd.Data
     idx = rng.choice(len(X_bg), target, replace=False)
     idx = np.asarray(sorted(idx), dtype=int)
     return X_bg.iloc[idx]
+
+
+def _parse_fp_bit(feature_name: str) -> Optional[int]:
+    name = str(feature_name).strip()
+    if name.startswith("fp_"):
+        token = name.split("fp_", 1)[1]
+        if token.isdigit():
+            return int(token)
+    return None
+
+
+def _bit_motifs_from_smiles(smiles: str, bit_id: int, radius: int, nbits: int) -> List[str]:
+    if not smiles:
+        return []
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return []
+    bit_info: Dict[int, List[Tuple[int, int]]] = {}
+    try:
+        AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nbits, bitInfo=bit_info)
+    except Exception:
+        return []
+    hits = bit_info.get(int(bit_id), [])
+    motifs: List[str] = []
+    for atom_idx, rad in hits:
+        try:
+            env = Chem.FindAtomEnvironmentOfRadiusN(mol, int(rad), int(atom_idx))
+            amap: Dict[int, int] = {}
+            submol = Chem.PathToSubmol(mol, env, atomMap=amap) if env else Chem.MolFromSmiles(Chem.MolToSmiles(mol))
+            if submol is None:
+                continue
+            smarts = Chem.MolToSmarts(submol)
+            if smarts:
+                motifs.append(smarts)
+        except Exception:
+            continue
+    return motifs
+
+
+def _build_fp_demasked_table(
+    *,
+    imp_df: pd.DataFrame,
+    feature_names: List[str],
+    feature_types: List[str],
+    shap_values: np.ndarray,
+    X_use: np.ndarray,
+    y_use: np.ndarray,
+    ids_use: List[str],
+    smiles_use: List[str],
+    fp_top_k: int,
+    fp_radius: int,
+    fp_nbits: int,
+) -> pd.DataFrame:
+    fp_imp = imp_df[imp_df["feature_type"].astype(str).str.lower() == "fp"].head(int(max(1, fp_top_k)))
+    if fp_imp.empty:
+        return pd.DataFrame()
+
+    name_to_idx = {str(n): i for i, n in enumerate(feature_names)}
+    rows: List[Dict[str, Any]] = []
+    n_samples = int(X_use.shape[0]) if X_use is not None else 0
+
+    for _, r in fp_imp.iterrows():
+        fname = str(r["feature"])
+        bit_id = _parse_fp_bit(fname)
+        if bit_id is None or fname not in name_to_idx:
+            continue
+        col_idx = int(name_to_idx[fname])
+        present_mask = np.asarray(X_use[:, col_idx] > 0, dtype=bool)
+        present_idx = np.where(present_mask)[0]
+        if present_idx.size == 0:
+            continue
+
+        shap_col = np.asarray(shap_values[:, col_idx], dtype=float)
+        mean_abs_present = float(np.mean(np.abs(shap_col[present_idx])))
+        mean_signed_present = float(np.mean(shap_col[present_idx]))
+        occurrence = int(present_idx.size)
+        occurrence_frac = float(occurrence / n_samples) if n_samples > 0 else float("nan")
+
+        motif_counts: Dict[str, int] = {}
+        for i in present_idx.tolist():
+            motifs = _bit_motifs_from_smiles(str(smiles_use[i]), bit_id=bit_id, radius=fp_radius, nbits=fp_nbits)
+            for m in motifs:
+                motif_counts[m] = motif_counts.get(m, 0) + 1
+        top_motif = ""
+        top_motif_count = 0
+        if motif_counts:
+            top_motif, top_motif_count = sorted(motif_counts.items(), key=lambda x: x[1], reverse=True)[0]
+
+        active_idx = [i for i in present_idx.tolist() if int(y_use[i]) == 1]
+        rep_id = ""
+        rep_smiles = ""
+        rep_shap = float("nan")
+        if active_idx:
+            best_i = max(active_idx, key=lambda i: shap_col[i])
+            rep_id = str(ids_use[best_i])
+            rep_smiles = str(smiles_use[best_i])
+            rep_shap = float(shap_col[best_i])
+
+        rows.append(
+            {
+                "feature": fname,
+                "bit_id": int(bit_id),
+                "mean_abs_shap_global": float(r["mean_abs_shap"]),
+                "mean_abs_shap_when_present": mean_abs_present,
+                "mean_signed_shap_when_present": mean_signed_present,
+                "occurrence_count": occurrence,
+                "occurrence_fraction": occurrence_frac,
+                "top_motif_smarts": top_motif,
+                "top_motif_count": int(top_motif_count),
+                "representative_active_id": rep_id,
+                "representative_active_smiles": rep_smiles,
+                "representative_active_shap": rep_shap,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("mean_abs_shap_global", ascending=False).reset_index(drop=True)
 
 
 def compute_linear_shap_for_model(
@@ -377,6 +511,23 @@ def compute_and_export(config: ShapConfig) -> Dict[str, Any]:
             task=np.asarray([config.task], dtype=object),
         )
 
+        fp_demasked_df = _build_fp_demasked_table(
+            imp_df=imp_df,
+            feature_names=feature_names,
+            feature_types=feature_types,
+            shap_values=shap_values,
+            X_use=X_use,
+            y_use=y_use,
+            ids_use=ids_use,
+            smiles_use=smiles_use,
+            fp_top_k=int(config.fp_top_k),
+            fp_radius=int(config.fp_radius),
+            fp_nbits=int(config.fp_nbits),
+        )
+        fp_demasked_csv = model_out_dir / "fp_motif_demasked.csv"
+        if not fp_demasked_df.empty:
+            fp_demasked_df.to_csv(fp_demasked_csv, index=False)
+
         meta = {
             "model": model_key,
             "task": config.task,
@@ -394,6 +545,7 @@ def compute_and_export(config: ShapConfig) -> Dict[str, Any]:
             "exports": {
                 "feature_importance_csv": str(imp_csv),
                 "shap_values_external_npz": str(shap_npz),
+                "fp_motif_demasked_csv": (str(fp_demasked_csv) if fp_demasked_csv.exists() else ""),
             },
         }
         (model_out_dir / "shap_meta.json").write_text(json.dumps(meta, indent=2))
@@ -422,21 +574,156 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--random-state", type=int, default=42)
     p.add_argument("--feature-name-mode", choices=["raw", "pretty"], default="raw")
     p.add_argument("--kernel-background-samples", type=int, default=100, help="Background samples for KernelExplainer")
+    p.add_argument("--fp-top-k", type=int, default=20, help="Top-K fingerprint bits to demask into motifs")
+    p.add_argument("--fp-radius", type=int, default=2, help="Morgan radius for bit demasking")
+    p.add_argument("--fp-nbits", type=int, default=2048, help="Morgan nBits for bit demasking")
     p.add_argument("--output-dir", type=Path, help="Output directory (default: <split_seed_dir>/shap_analysis)")
+    p.add_argument("--plot-only", action="store_true", help="Plot only from existing SHAP exports")
+    p.add_argument("--plot-model", help="Model key for plot-only mode (default: first from --models)")
+    p.add_argument("--local-id", help="Optional sample id for local explanation in plot-only mode")
     return p.parse_args()
+
+
+def plot_only_from_exports(
+    *,
+    run_dir: Path,
+    split_seed: int,
+    model_key: str,
+    output_dir: Optional[Path] = None,
+    local_id: Optional[str] = None,
+    dpi: int = 600,
+) -> None:
+    import matplotlib as mpl
+    mpl.use("Agg", force=True)
+    from matplotlib import pyplot as plt
+    import shap  # type: ignore
+
+    out_dir = output_dir or (_resolve_split_dir(run_dir, split_seed) / "shap_analysis")
+    model_dir = out_dir / model_key
+    npz_path = model_dir / "shap_values_external.npz"
+    imp_path = model_dir / "feature_importance.csv"
+    fp_demasked_path = model_dir / "fp_motif_demasked.csv"
+    if not npz_path.exists() or not imp_path.exists():
+        raise FileNotFoundError(f"Missing required SHAP exports under {model_dir}")
+
+    mpl.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Cambria", "Times New Roman", "DejaVu Serif"],
+        "font.size": 10,
+        "figure.dpi": dpi,
+        "savefig.dpi": dpi,
+        "axes.grid": False,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    })
+
+    with np.load(npz_path, allow_pickle=True) as data:
+        shap_values = np.asarray(data["shap_values"], dtype=np.float64)
+        X = np.asarray(data["X"], dtype=np.float64)
+        y_prob = np.asarray(data["y_prob"], dtype=np.float64) if "y_prob" in data.files else np.asarray([])
+        ids = [str(x) for x in np.atleast_1d(data["id"]).tolist()]
+        base_value = float(np.asarray(data["base_value"], dtype=np.float64).reshape(-1)[0])
+        feature_display = [str(x) for x in np.atleast_1d(data["feature_display"]).tolist()]
+    X_df = pd.DataFrame(X, columns=feature_display)
+    imp_df = pd.read_csv(imp_path)
+
+    def _save(fig, name: str) -> None:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(model_dir / f"{name}.png", bbox_inches="tight", dpi=dpi)
+        fig.savefig(model_dir / f"{name}.svg", bbox_inches="tight")
+        plt.close(fig)
+
+    fig = plt.figure(figsize=(7.2, 5.2))
+    shap.summary_plot(shap_values, X_df, feature_names=feature_display, max_display=20, show=False, cmap="viridis")
+    plt.xlabel("SHAP value (impact on model output)")
+    plt.title(f"{model_key} | SHAP Summary", fontsize=11, pad=10)
+    plt.tight_layout()
+    _save(fig, "A_global_shap_summary_beeswarm")
+
+    desc_df = imp_df[imp_df["feature_type"].astype(str).str.lower() == "descriptor"].sort_values("mean_abs_shap", ascending=False).head(20)
+    if not desc_df.empty:
+        fig, ax = plt.subplots(figsize=(6.8, 5.6))
+        y = np.arange(len(desc_df))
+        ax.barh(y, desc_df["mean_abs_shap"].to_numpy(), color="#4C72B0", edgecolor="black", linewidth=0.6)
+        ax.set_yticks(y)
+        ax.set_yticklabels(desc_df["feature_display"].astype(str).tolist())
+        ax.invert_yaxis()
+        ax.set_xlabel("Mean |SHAP value|")
+        ax.set_title(f"{model_key} | Descriptor Importance Ranking")
+        _save(fig, "B_descriptor_importance_ranking")
+
+    if fp_demasked_path.exists():
+        fp_df = pd.read_csv(fp_demasked_path).head(20)
+        if not fp_df.empty:
+            fig, ax = plt.subplots(figsize=(8.8, 6.2))
+            y = np.arange(len(fp_df))
+            ax.barh(y, fp_df["mean_abs_shap_global"].to_numpy(), color="#55A868", edgecolor="black", linewidth=0.6)
+            ax.set_yticks(y)
+            ax.set_yticklabels([f"bit {int(b)} | f={float(fr):.2f}" for b, fr in zip(fp_df["bit_id"], fp_df["occurrence_fraction"])])
+            ax.invert_yaxis()
+            ax.set_xlabel("Mean |SHAP value|")
+            ax.set_title(f"{model_key} | De-masked Fingerprint Motifs")
+            _save(fig, "C_demasked_fp_motifs")
+
+    if shap_values.ndim == 2 and len(shap_values) > 0:
+        sample_idx = 0
+        if local_id is not None and local_id in ids:
+            sample_idx = ids.index(local_id)
+        elif y_prob.size == len(shap_values):
+            sample_idx = int(np.nanargmax(y_prob))
+        contrib = shap_values[sample_idx]
+        top_idx = np.argsort(np.abs(contrib))[::-1][:10]
+        fig, ax = plt.subplots(figsize=(7.2, 4.6))
+        vals = contrib[top_idx]
+        feats = [feature_display[i] for i in top_idx]
+        ax.barh(np.arange(len(top_idx)), vals, color=["#C44E52" if v > 0 else "#4C72B0" for v in vals], edgecolor="black", linewidth=0.5)
+        ax.set_yticks(np.arange(len(top_idx)))
+        ax.set_yticklabels(feats)
+        ax.invert_yaxis()
+        ax.axvline(0.0, color="black", linewidth=0.9)
+        pred_txt = f"{float(y_prob[sample_idx]):.3f}" if y_prob.size == len(shap_values) else "NA"
+        ax.set_title(f"{model_key} | Local Contributors | id={ids[sample_idx]} | p={pred_txt}")
+        ax.set_xlabel("SHAP value")
+        _save(fig, "D_local_top_contributors")
+
+        fig = plt.figure(figsize=(8.2, 5.2))
+        explanation = shap.Explanation(values=contrib, base_values=base_value, data=X[sample_idx], feature_names=feature_display)
+        shap.plots.waterfall(explanation, max_display=10, show=False)
+        plt.title(f"{model_key} | Local Waterfall | id={ids[sample_idx]}", fontsize=11, pad=10)
+        plt.tight_layout()
+        _save(fig, "D_local_waterfall")
 
 
 def main() -> None:
     args = parse_args()
+    model_list = [m.strip() for m in args.models.split(",") if m.strip()]
+    if args.plot_only:
+        target_model = (args.plot_model or (model_list[0] if model_list else "SVC")).upper()
+        plot_only_from_exports(
+            run_dir=args.run_dir,
+            split_seed=int(args.split_seed),
+            model_key=target_model,
+            output_dir=args.output_dir,
+            local_id=args.local_id,
+            dpi=600,
+        )
+        print("[OK] Plot-only export complete")
+        print(f"  - Model: {target_model}")
+        print(f"  - Output dir: {(args.output_dir or (_resolve_split_dir(args.run_dir, int(args.split_seed)) / 'shap_analysis')) / target_model}")
+        return
+
     cfg = ShapConfig(
         run_dir=args.run_dir,
         split_seed=int(args.split_seed),
-        models=[m.strip() for m in args.models.split(",") if m.strip()],
+        models=model_list,
         task=str(args.task),
         max_samples=(int(args.max_samples) if args.max_samples else None),
         random_state=int(args.random_state),
         feature_name_mode=str(args.feature_name_mode),
         kernel_background_samples=int(args.kernel_background_samples),
+        fp_top_k=int(args.fp_top_k),
+        fp_radius=int(args.fp_radius),
+        fp_nbits=int(args.fp_nbits),
         output_dir=args.output_dir,
     )
     summary = compute_and_export(cfg)
@@ -479,6 +766,7 @@ if _IN_IPYTHON:
         "dpi": 600,
         "max_display": 20,
         "heatmap_samples": 64,
+        "local_top_k": 10,
     }
 
     mpl.rcParams.update({
@@ -507,9 +795,13 @@ if _IN_IPYTHON:
     MODEL_KEY = "SVC"   # "LR" or "SVC"
 
     npz_path = OUT_DIR / MODEL_KEY / "shap_values_external.npz"
+    imp_path = OUT_DIR / MODEL_KEY / "feature_importance.csv"
+    fp_demasked_path = OUT_DIR / MODEL_KEY / "fp_motif_demasked.csv"
 
     if not npz_path.exists():
         raise FileNotFoundError(f"Missing SHAP exports: {npz_path}")
+    if not imp_path.exists():
+        raise FileNotFoundError(f"Missing feature importance: {imp_path}")
 
     if shap is None:
         raise ImportError("Install SHAP: pip install shap")
@@ -518,9 +810,17 @@ if _IN_IPYTHON:
     with np.load(npz_path, allow_pickle=True) as data:
         shap_values = np.asarray(data["shap_values"], dtype=np.float64)
         X = np.asarray(data["X"], dtype=np.float64)
+        y_prob = np.asarray(data["y_prob"], dtype=np.float64) if "y_prob" in data.files else np.asarray([])
+        ids = [str(x) for x in np.atleast_1d(data["id"]).tolist()]
+        smiles = [str(x) for x in np.atleast_1d(data["smiles"]).tolist()]
+        y_true = np.asarray(data["y_true"], dtype=np.float64) if "y_true" in data.files else np.asarray([])
+        base_value = float(np.asarray(data["base_value"], dtype=np.float64).reshape(-1)[0])
+        feature_names_raw = [str(x) for x in np.atleast_1d(data["feature_names"]).tolist()]
+        feature_types = [str(x) for x in np.atleast_1d(data["feature_types"]).tolist()]
         feature_display = [str(x) for x in np.atleast_1d(data["feature_display"]).tolist()]
 
     X_df = pd.DataFrame(X, columns=feature_display)
+    imp_df = pd.read_csv(imp_path)
 
 
     def _save_fig(fig, name: str):
@@ -530,7 +830,7 @@ if _IN_IPYTHON:
         fig.savefig(out_dir / f"{name}.png", bbox_inches="tight", dpi=PLOT_STYLE["dpi"])
         fig.savefig(out_dir / f"{name}.svg", bbox_inches="tight")
 
-    # 1. SHAP Beeswarm
+    # (A) Global SHAP summary plot (top-20; descriptor+fp mixed; colored by feature value)
     fig = plt.figure(figsize=(7.2, 5.2))
 
     shap.summary_plot(
@@ -546,43 +846,97 @@ if _IN_IPYTHON:
     plt.title(f"{MODEL_KEY} | SHAP Summary", fontsize=11, pad=10)
 
     plt.tight_layout()
-    _save_fig(fig, "shap_summary_beeswarm")
+    _save_fig(fig, "A_global_shap_summary_beeswarm")
     plt.show()
 
-    # 2. SHAP Heatmap
-    try:
-        n_heat = min(PLOT_STYLE["heatmap_samples"], len(X_df))
-
-        # top features by mean |SHAP| - based on ALL samples (consistent with CSV & beeswarm)
-        mean_abs_shap = np.abs(shap_values).mean(axis=0)
-        top_idx = np.argsort(mean_abs_shap)[::-1][:15]
-
-        # Select top features from first n_heat samples to plot
-        shap_sub = shap_values[:n_heat][:, top_idx]
-        X_sub = X_df.iloc[:n_heat, top_idx]
-        feature_sub = [feature_display[i] for i in top_idx]
-
-        explanation = shap.Explanation(
-            values=shap_sub,
-            data=X_sub,
-            feature_names=feature_sub,
-        )
-
-        fig = plt.figure(figsize=(8, 0.35 * len(feature_sub) + 2))
-
-        shap.plots.heatmap(
-            explanation,
-            max_display=len(feature_sub),
-            show=False,
-        )
-
-        plt.title(f"{MODEL_KEY} | SHAP Heatmap (n={n_heat})", fontsize=11, pad=10)
-        plt.gca().tick_params(axis='y', labelsize=8)
-
+    # (B) Descriptor importance ranking (mean |SHAP|)
+    desc_df = (
+        imp_df[imp_df["feature_type"].astype(str).str.lower() == "descriptor"]
+        .sort_values("mean_abs_shap", ascending=False)
+        .head(20)
+    )
+    if not desc_df.empty:
+        fig, ax = plt.subplots(figsize=(6.8, 5.6))
+        y = np.arange(len(desc_df))
+        ax.barh(y, desc_df["mean_abs_shap"].to_numpy(), color="#4C72B0", edgecolor="black", linewidth=0.6, alpha=0.9)
+        ax.set_yticks(y)
+        ax.set_yticklabels(desc_df["feature_display"].astype(str).tolist())
+        ax.invert_yaxis()
+        ax.set_xlabel("Mean |SHAP value|")
+        ax.set_title(f"{MODEL_KEY} | Descriptor Importance Ranking")
+        ax.grid(False)
         plt.tight_layout()
-        _save_fig(fig, "shap_heatmap_clean")
+        _save_fig(fig, "B_descriptor_importance_ranking")
         plt.show()
 
-    except Exception as e:
-        print(f"[WARN] Heatmap skipped: {e}")
+    # (C) De-masked fingerprint motifs summary
+    if fp_demasked_path.exists():
+        fp_df = pd.read_csv(fp_demasked_path).head(20)
+        if not fp_df.empty:
+            fig, ax = plt.subplots(figsize=(8.8, 6.2))
+            y = np.arange(len(fp_df))
+            ax.barh(y, fp_df["mean_abs_shap_global"].to_numpy(), color="#55A868", edgecolor="black", linewidth=0.6, alpha=0.9)
+            labels = []
+            for _, row in fp_df.iterrows():
+                labels.append(f"bit {int(row['bit_id'])} | f={float(row['occurrence_fraction']):.2f}")
+            ax.set_yticks(y)
+            ax.set_yticklabels(labels)
+            ax.invert_yaxis()
+            ax.set_xlabel("Mean |SHAP value|")
+            ax.set_title(f"{MODEL_KEY} | De-masked Fingerprint Motifs")
+            for yi, (_, row) in enumerate(fp_df.iterrows()):
+                txt = f"SMARTS: {str(row.get('top_motif_smarts', ''))}\nRep active: {str(row.get('representative_active_id', 'NA'))}"
+                ax.text(float(row["mean_abs_shap_global"]) + 0.001, yi, txt, va="center", fontsize=7)
+            ax.grid(False)
+            plt.tight_layout()
+            _save_fig(fig, "C_demasked_fp_motifs")
+            plt.show()
+    else:
+        print(f"[WARN] Missing fp motif demasked csv: {fp_demasked_path}")
+
+    # (D) Local explanation example (single compound)
+    if shap_values.ndim == 2 and len(shap_values) > 0:
+        if y_prob.size == len(shap_values):
+            sample_idx = int(np.nanargmax(y_prob))
+        else:
+            sample_idx = 0
+
+        contrib = shap_values[sample_idx]
+        top_k = int(PLOT_STYLE["local_top_k"])
+        top_idx = np.argsort(np.abs(contrib))[::-1][:top_k]
+        top_features = [feature_display[i] for i in top_idx]
+        top_values = contrib[top_idx]
+
+        fig, ax = plt.subplots(figsize=(7.2, 4.6))
+        colors = ["#C44E52" if v > 0 else "#4C72B0" for v in top_values]
+        ypos = np.arange(len(top_idx))
+        ax.barh(ypos, top_values, color=colors, edgecolor="black", linewidth=0.5)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(top_features)
+        ax.invert_yaxis()
+        ax.axvline(0.0, color="black", linewidth=0.9)
+        pred_txt = f"{float(y_prob[sample_idx]):.3f}" if y_prob.size == len(shap_values) else "NA"
+        title = f"{MODEL_KEY} | Local Contributors | id={ids[sample_idx]} | p={pred_txt}"
+        ax.set_title(title)
+        ax.set_xlabel("SHAP value")
+        ax.grid(False)
+        plt.tight_layout()
+        _save_fig(fig, "D_local_top_contributors")
+        plt.show()
+
+        try:
+            explanation = shap.Explanation(
+                values=contrib,
+                base_values=base_value,
+                data=X[sample_idx],
+                feature_names=feature_display,
+            )
+            fig = plt.figure(figsize=(8.2, 5.2))
+            shap.plots.waterfall(explanation, max_display=top_k, show=False)
+            plt.title(f"{MODEL_KEY} | Local Waterfall | id={ids[sample_idx]}", fontsize=11, pad=10)
+            plt.tight_layout()
+            _save_fig(fig, "D_local_waterfall")
+            plt.show()
+        except Exception as e:
+            print(f"[WARN] Local waterfall skipped: {e}")
 # %%

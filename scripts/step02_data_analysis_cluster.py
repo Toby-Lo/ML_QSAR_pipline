@@ -101,7 +101,6 @@ ax.set_title('PCA Projection', fontweight='bold')
 
 ax.legend(frameon=True)
 
-# 期刊风
 ax.spines['top'].set_visible(False)
 ax.spines['right'].set_visible(False)
 ax.tick_params(direction='out', length=5, width=1)

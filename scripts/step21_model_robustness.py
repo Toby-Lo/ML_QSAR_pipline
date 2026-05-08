@@ -13,11 +13,19 @@ Example:
     --input data/NSD2/nsd2_final_dataset_feature_fingerprint.csv
 
 python scripts/step21_model_robustness.py \
-    --run-dir models_out/qsar_ml_20260410_124055 \
+    --run-dir models_out/qsar_ml_20260412_162829 \
     --split-seed 12345 \
     --models SVC \
     --n-permutations 500 \
     --input data/NSD2/nsd2_final_dataset_feature_fingerprint.csv
+
+Only Plots
+python scripts/step21_model_robustness.py \
+  --run-dir models_out/qsar_ml_20260412_162829 \
+  --split-seed 12345 \
+  --models SVC \
+  --plot-only
+
 """
 
 # %%
@@ -37,7 +45,7 @@ import matplotlib
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.metrics import r2_score, roc_auc_score
+from sklearn.metrics import matthews_corrcoef, r2_score, roc_auc_score
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors
@@ -58,7 +66,7 @@ PLOT_CONFIG: Dict[str, Any] = {
     "interactive_backend": "Qt5Agg",
     "use_interactive": True,
     "display_plots": True,
-    "font_family": "Times New Roman",
+    "font_family": "Cambria", #"Times New Roman",
     "font_size": 11,
     "title_fontsize": 14,
     "label_fontsize": 12,
@@ -404,6 +412,28 @@ def _metric(y_true: np.ndarray, y_score: np.ndarray, task: str) -> float:
         return float("nan")
 
 
+def _score_to_label(y_score: np.ndarray) -> np.ndarray:
+    arr = np.asarray(y_score, dtype=float)
+    if arr.size == 0:
+        return np.array([], dtype=int)
+    # Probabilities are thresholded at 0.5; decision_function scores at 0.0.
+    if float(np.nanmin(arr)) >= 0.0 and float(np.nanmax(arr)) <= 1.0:
+        return (arr >= 0.5).astype(int)
+    return (arr >= 0.0).astype(int)
+
+
+def _classification_metrics(y_true: np.ndarray, y_score: np.ndarray) -> Dict[str, float]:
+    try:
+        roc_auc = float(roc_auc_score(y_true, y_score))
+    except Exception:
+        roc_auc = float("nan")
+    try:
+        mcc = float(matthews_corrcoef(y_true, _score_to_label(y_score)))
+    except Exception:
+        mcc = float("nan")
+    return {"roc_auc": roc_auc, "mcc": mcc}
+
+
 def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
     if len(x) == 0 or len(y) == 0:
         return float("nan")
@@ -450,27 +480,35 @@ def run_y_scrambling_for_model(
     task: str,
     random_state: int,
     logger: logging.Logger,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+) -> Tuple[pd.DataFrame, Dict[str, Any], Optional[pd.DataFrame]]:
     model_path = split_dir / "models" / "full_dev" / model_key / f"seed_{split_seed}" / "model.joblib"
     model = joblib.load(model_path)
     X_dev, y_dev, X_ext, y_ext = prepare_model_inputs(split_dir, model_key, split_data, split_seed)
 
-    actual_score = _metric(y_ext, _get_scores(model, X_ext, task), task)
+    actual_scores = _get_scores(model, X_ext, task)
+    actual_score = _metric(y_ext, actual_scores, task)
+    actual_metrics = _classification_metrics(y_ext, actual_scores) if task == "classification" else {}
     rng = np.random.default_rng(random_state + split_seed + len(model_key))
     rows: List[Dict[str, Any]] = []
+    perm_score_matrix: List[np.ndarray] = []
 
     for perm_idx in range(1, n_permutations + 1):
         y_perm = rng.permutation(y_dev)
         perm_model = clone(model)
         perm_model.fit(X_dev, y_perm)
-        perm_score = _metric(y_ext, _get_scores(perm_model, X_ext, task), task)
-        rows.append(
-            {
-                "permutation_idx": perm_idx,
-                "y_corr": _safe_corr(y_dev.astype(float), y_perm.astype(float)),
-                "metric": perm_score,
-            }
-        )
+        perm_scores = _get_scores(perm_model, X_ext, task)
+        perm_score = _metric(y_ext, perm_scores, task)
+        row = {
+            "permutation_idx": perm_idx,
+            "y_corr": _safe_corr(y_dev.astype(float), y_perm.astype(float)),
+            "metric": perm_score,
+        }
+        if task == "classification":
+            cls = _classification_metrics(y_ext, perm_scores)
+            row["roc_auc"] = cls["roc_auc"]
+            row["mcc"] = cls["mcc"]
+            perm_score_matrix.append(np.asarray(perm_scores, dtype=float))
+        rows.append(row)
 
     df = pd.DataFrame(rows)
     vals = df["metric"].to_numpy(dtype=float) if not df.empty else np.array([], dtype=float)
@@ -489,10 +527,36 @@ def run_y_scrambling_for_model(
         "z_score": z_score,
         "p_value": p_value,
     }
+    sample_prob_df: Optional[pd.DataFrame] = None
+    if task == "classification":
+        roc_vals = df["roc_auc"].to_numpy(dtype=float) if "roc_auc" in df.columns else np.array([], dtype=float)
+        mcc_vals = df["mcc"].to_numpy(dtype=float) if "mcc" in df.columns else np.array([], dtype=float)
+        summary.update(
+            {
+                "actual_roc_auc": float(actual_metrics.get("roc_auc", np.nan)),
+                "actual_mcc": float(actual_metrics.get("mcc", np.nan)),
+                "perm_roc_auc_mean": float(np.nanmean(roc_vals)) if roc_vals.size else float("nan"),
+                "perm_roc_auc_std": float(np.nanstd(roc_vals)) if roc_vals.size else float("nan"),
+                "perm_mcc_mean": float(np.nanmean(mcc_vals)) if mcc_vals.size else float("nan"),
+                "perm_mcc_std": float(np.nanstd(mcc_vals)) if mcc_vals.size else float("nan"),
+            }
+        )
+        if perm_score_matrix:
+            perm_scores_arr = np.vstack(perm_score_matrix)
+            sample_prob_df = pd.DataFrame(
+                {
+                    "id": np.asarray(split_data["external"]["id"], dtype=object),
+                    "smiles": np.asarray(split_data["external"]["smiles"], dtype=object),
+                    "y_true": y_ext.astype(int),
+                    "true_score": np.asarray(actual_scores, dtype=float),
+                    "scrambled_mean_score": np.nanmean(perm_scores_arr, axis=0),
+                    "scrambled_std_score": np.nanstd(perm_scores_arr, axis=0),
+                }
+            )
     logger.info(
         f"{model_key}: actual={actual_score:.4f}, perm_mean={mean_perm:.4f}, z={z_score:.3f}, p={p_value:.4f}"
     )
-    return df, summary
+    return df, summary, sample_prob_df
 
 
 # %%
@@ -570,6 +634,133 @@ def load_saved_permutation_results(run_dir: Path, split_seed: int, model_key: st
     return perm_df, summary
 
 
+def print_permutation_stats(summary: Dict[str, Any]) -> None:
+    model = str(summary.get("model", "UNKNOWN"))
+    task = str(summary.get("task", "classification")).lower()
+    print(f"[STATS] model={model}")
+    if task == "classification" and ("perm_roc_auc_mean" in summary or "perm_mcc_mean" in summary):
+        roc_mean = float(summary.get("perm_roc_auc_mean", float("nan")))
+        roc_std = float(summary.get("perm_roc_auc_std", float("nan")))
+        mcc_mean = float(summary.get("perm_mcc_mean", float("nan")))
+        mcc_std = float(summary.get("perm_mcc_std", float("nan")))
+        print(f"  scrambled ROC-AUC: mean={roc_mean:.4f}, std={roc_std:.4f}")
+        print(f"  scrambled MCC:     mean={mcc_mean:.4f}, std={mcc_std:.4f}")
+    else:
+        metric_mean = float(summary.get("perm_metric_mean", float("nan")))
+        metric_std = float(summary.get("perm_metric_std", float("nan")))
+        print(f"  scrambled metric:  mean={metric_mean:.4f}, std={metric_std:.4f}")
+
+
+def plot_robustness_composite(run_dir: Path, split_seed: int, model_key: str) -> Tuple[Path, Path]:
+    model_dir = run_dir / f"split_seed_{split_seed}" / "robustness" / model_key
+    perm_csv = model_dir / "y_scrambling_permutations.csv"
+    summary_json = model_dir / "y_scrambling_summary.json"
+    sample_csv = model_dir / "true_vs_scrambled_scores.csv"
+    for p in [perm_csv, summary_json, sample_csv]:
+        if not p.exists():
+            raise FileNotFoundError(f"Missing required file for plot-only mode: {p}")
+
+    perm = pd.read_csv(perm_csv)
+    summary = json.loads(summary_json.read_text())
+    sample = pd.read_csv(sample_csv)
+    if not {"roc_auc", "mcc"}.issubset(perm.columns):
+        raise ValueError("y_scrambling_permutations.csv must include 'roc_auc' and 'mcc' columns")
+    if not {"true_score", "scrambled_mean_score"}.issubset(sample.columns):
+        raise ValueError("true_vs_scrambled_scores.csv missing required columns")
+
+    roc_vals = pd.to_numeric(perm["roc_auc"], errors="coerce").to_numpy()
+    mcc_vals = pd.to_numeric(perm["mcc"], errors="coerce").to_numpy()
+    true_score = pd.to_numeric(sample["true_score"], errors="coerce").to_numpy()
+    scrambled_score = pd.to_numeric(sample["scrambled_mean_score"], errors="coerce").to_numpy()
+    valid = ~(np.isnan(true_score) | np.isnan(scrambled_score))
+    true_score = true_score[valid]
+    scrambled_score = scrambled_score[valid]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9.5))
+    ax_a, ax_b, ax_c, ax_d = axes.flatten()
+    for ax in [ax_a, ax_b, ax_c, ax_d]:
+        _style_axis(ax)
+        ax.grid(False)
+
+    # (A) ROC-AUC distribution
+    ax_a.hist(roc_vals[~np.isnan(roc_vals)], bins=PLOT_CONFIG["hist_bins"], color="#4C72B0", alpha=0.8, edgecolor="black", linewidth=0.4)
+    actual_roc = float(summary.get("actual_roc_auc", np.nan))
+    if not np.isnan(actual_roc):
+        ax_a.axvline(actual_roc, color="#C44E52", linestyle="--", linewidth=1.8, label=f"True-label ROC-AUC={actual_roc:.3f}")
+        ax_a.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
+    ax_a.set_title("(A) ROC-AUC distribution (scrambled)")
+    ax_a.set_xlabel("ROC-AUC")
+    ax_a.set_ylabel("Count")
+
+    # (B) MCC distribution
+    ax_b.hist(mcc_vals[~np.isnan(mcc_vals)], bins=PLOT_CONFIG["hist_bins"], color="#55A868", alpha=0.8, edgecolor="black", linewidth=0.4)
+    actual_mcc = float(summary.get("actual_mcc", np.nan))
+    if not np.isnan(actual_mcc):
+        ax_b.axvline(actual_mcc, color="#C44E52", linestyle="--", linewidth=1.8, label=f"True-label MCC={actual_mcc:.3f}")
+        ax_b.legend(loc="upper right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
+    ax_b.set_title("(B) MCC distribution (scrambled)")
+    ax_b.set_xlabel("MCC")
+    ax_b.set_ylabel("Count")
+
+    # (C) True vs scrambled performance comparison
+    bars_labels = ["ROC-AUC (True)", "ROC-AUC (Scrambled)", "MCC (True)", "MCC (Scrambled)"]
+    bars_vals = [
+        float(summary.get("actual_roc_auc", np.nan)),
+        float(summary.get("perm_roc_auc_mean", np.nan)),
+        float(summary.get("actual_mcc", np.nan)),
+        float(summary.get("perm_mcc_mean", np.nan)),
+    ]
+    bar_colors = ["#4C72B0", "#9ec1e6", "#55A868", "#a5d6a7"]
+    xpos = np.arange(len(bars_labels))
+    bars = ax_c.bar(xpos, bars_vals, color=bar_colors, edgecolor="black", linewidth=0.8)
+    ax_c.set_xticks(xpos)
+    ax_c.set_xticklabels(bars_labels, rotation=20, ha="right")
+    bar_top = float(np.nanmax(np.asarray(bars_vals, dtype=float))) if len(bars_vals) else 1.0
+    ax_c.set_ylim(0.0, min(1.0, max(0.05, bar_top + 0.10)))
+    ax_c.set_title("(C) True vs scrambled performance")
+    ax_c.set_ylabel("Metric value")
+    roc_mu = float(summary.get("perm_roc_auc_mean", np.nan))
+    roc_sd = float(summary.get("perm_roc_auc_std", np.nan))
+    mcc_mu = float(summary.get("perm_mcc_mean", np.nan))
+    mcc_sd = float(summary.get("perm_mcc_std", np.nan))
+    ax_c.text(
+        0.98,
+        0.96,
+        f"Scrambled ROC-AUC: {roc_mu:.3f}±{roc_sd:.3f}\n"
+        f"Scrambled MCC: {mcc_mu:.3f}±{mcc_sd:.3f}",
+        transform=ax_c.transAxes,
+        ha="right",
+        va="top",
+        fontsize=9,
+        bbox={"facecolor": "white", "edgecolor": "black", "alpha": 1.0, "boxstyle": "square,pad=0.25"},
+    )
+    for b, v in zip(bars, bars_vals):
+        if np.isnan(v):
+            continue
+        ax_c.text(b.get_x() + b.get_width() / 2.0, v + 0.008, f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+
+    # (D) True vs scrambled prediction scores
+    ax_d.scatter(true_score, scrambled_score, s=22, alpha=0.6, color="#8172B2", edgecolors="none")
+    lim_low = float(np.nanmin([np.nanmin(true_score), np.nanmin(scrambled_score)])) if len(true_score) else 0.0
+    lim_high = float(np.nanmax([np.nanmax(true_score), np.nanmax(scrambled_score)])) if len(true_score) else 1.0
+    ax_d.plot([lim_low, lim_high], [lim_low, lim_high], "--", color="#C44E52", linewidth=1.4, label="y = x")
+    ax_d.set_title("(D) True vs scrambled prediction scores")
+    ax_d.set_xlabel("True-label score")
+    ax_d.set_ylabel("Scrambled mean score")
+    ax_d.legend(loc="upper right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
+
+    fig.suptitle(f"Robustness Analysis (split {split_seed}, {model_key})", y=0.995, fontsize=15, fontweight="bold")
+    out_dir = run_dir / f"split_seed_{split_seed}" / "robustness" / model_key / "composite_plots"
+    ensure_dir(out_dir)
+    out_png = out_dir / "robustness_composite_2x2.png"
+    out_svg = out_dir / "robustness_composite_2x2.svg"
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.965])
+    fig.savefig(out_png, dpi=PLOT_CONFIG["dpi"], bbox_inches="tight")
+    fig.savefig(out_svg, bbox_inches="tight")
+    plt.close(fig)
+    return out_png, out_svg
+
+
 def replot_model_from_saved(run_dir: Path, split_seed: int, model_key: str, task: str = "classification") -> None:
     """Interactive helper: tweak PLOT_CONFIG then re-render plots from saved CSV/JSON."""
     perm_df, summary = load_saved_permutation_results(run_dir, split_seed, model_key)
@@ -627,7 +818,7 @@ def run_robustness(config: Dict[str, Any]) -> Dict[str, Any]:
 
     for idx, model_key in enumerate(models, start=1):
         logger.info(f"[{idx}/{len(models)}] Running y-scrambling for {model_key}")
-        perm_df, summary = run_y_scrambling_for_model(
+        perm_df, summary, sample_prob_df = run_y_scrambling_for_model(
             split_dir=split_dir,
             model_key=model_key,
             split_seed=split_seed,
@@ -641,6 +832,9 @@ def run_robustness(config: Dict[str, Any]) -> Dict[str, Any]:
         ensure_dir(model_out_dir)
         perm_df.to_csv(model_out_dir / "y_scrambling_permutations.csv", index=False)
         (model_out_dir / "y_scrambling_summary.json").write_text(json.dumps(summary, indent=2))
+        if sample_prob_df is not None:
+            sample_prob_df.to_csv(model_out_dir / "true_vs_scrambled_scores.csv", index=False)
+        print_permutation_stats(summary)
         summaries.append(summary)
 
         if make_plots:
@@ -686,6 +880,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-display", action="store_true", help="Disable interactive plot display")
     parser.add_argument("--non-interactive", action="store_true", help="Force non-interactive backend")
     parser.add_argument("--no-plots", action="store_true", help="Compute/export only; skip saving figures")
+    parser.add_argument("--plot-only", action="store_true", help="Only render composite plot from existing robustness outputs")
     return parser.parse_args()
 
 
@@ -695,6 +890,22 @@ def main() -> None:
         PLOT_CONFIG["display_plots"] = False
     if args.non_interactive:
         PLOT_CONFIG["use_interactive"] = False
+
+    if args.plot_only:
+        model_key = [m.strip() for m in args.models.split(",") if m.strip()][0]
+        _, summary = load_saved_permutation_results(
+            run_dir=args.run_dir,
+            split_seed=int(args.split_seed),
+            model_key=model_key,
+        )
+        print_permutation_stats(summary)
+        out_png, out_svg = plot_robustness_composite(
+            run_dir=args.run_dir,
+            split_seed=int(args.split_seed),
+            model_key=model_key,
+        )
+        print(f"[DONE] Saved to:\n  {out_png}\n  {out_svg}")
+        return
 
     config = {
         "run_dir": args.run_dir,

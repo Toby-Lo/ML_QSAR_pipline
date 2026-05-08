@@ -12,7 +12,7 @@ from pathlib import Path
 import os
 
 # Set visualization style
-%matplotlib inline
+# %% matplotlib inline
 sns.set_theme(style="whitegrid")
 
 # Helper function to compute descriptors
