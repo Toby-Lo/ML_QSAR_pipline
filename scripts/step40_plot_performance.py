@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import rcParams
-from matplotlib.patches import Patch
+from matplotlib.patches import Circle, Patch
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
 
@@ -84,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--palette", default="colorblind", help="Seaborn palette name")
     parser.add_argument("--dpi", type=int, default=600, help="Figure DPI")
     parser.add_argument("--font", default="Cambria", help="Serif font for publication style")
+    parser.add_argument("--polar-show-values", action="store_true", help="Show numeric values above polar bars")
     return parser.parse_args()
 
 
@@ -544,6 +545,7 @@ def plot_polar_metric_bars(
     dpi: int,
     font: str,
     global_color_map: Dict[str, tuple],
+    show_values: bool = False,
 ) -> None:
     if metric_df.empty:
         return
@@ -553,79 +555,141 @@ def plot_polar_metric_bars(
         print(f"[WARN] No models available for polar plot at stage '{stage}'.")
         return
 
-    angles = np.linspace(0, 2 * np.pi, len(POLAR_METRIC_ORDER), endpoint=False)  # metric centers
     get_or_assign_model_colors(models, palette_name, global_color_map)
-    fig, ax = plt.subplots(1, 1, figsize=(10.5, 10.5), subplot_kw={"projection": "polar"})
+    fig, ax = plt.subplots(1, 1, figsize=(11, 11), subplot_kw={"projection": "polar"})
     n_metrics = len(POLAR_METRIC_ORDER)
     n_models = len(models)
     sector_width = 2 * np.pi / n_metrics
-    group_width = sector_width * 0.72
-    bar_width = group_width / max(n_models, 1) * 0.92
+    total_bars = n_metrics * n_models
+    group_gap_units = 1.2
+    unit_angle = 2 * np.pi / (total_bars + n_metrics * group_gap_units)
+    bar_slot = unit_angle
+    group_gap = group_gap_units * unit_angle
+    bar_width = bar_slot * 0.92
+    inner_radius = 0.22
+    radial_scale = 0.72
 
-    for metric_idx, metric in enumerate(POLAR_METRIC_ORDER):
-        metric_center = angles[metric_idx]
-        left_edge = metric_center - group_width / 2.0
+    theta_centers: List[float] = []
+    group_centers: List[float] = []
+    theta_cursor = 0.0
+    for _ in POLAR_METRIC_ORDER:
+        bar_centers = [theta_cursor + (i + 0.5) * bar_slot for i in range(n_models)]
+        theta_centers.extend(bar_centers)
+        group_centers.append(float(np.mean(bar_centers)))
+        theta_cursor += n_models * bar_slot + group_gap
+
+    # Re-center so MCC group center sits exactly at 12 o'clock.
+    center_shift = -group_centers[0]
+    theta_centers = [((t + center_shift) % (2 * np.pi)) for t in theta_centers]
+    group_centers = [((t + center_shift) % (2 * np.pi)) for t in group_centers]
+
+    bar_idx = 0
+    for metric in POLAR_METRIC_ORDER:
         metric_df_sub = metric_df[metric_df["metric"] == metric]
-        for model_idx, model in enumerate(models):
+        for model in models:
             vals = pd.to_numeric(
                 metric_df_sub.loc[metric_df_sub["model"] == model, "value"],
                 errors="coerce",
             ).dropna().to_numpy()
             if vals.size == 0:
                 print(f"[WARN] Missing values for metric '{metric}' and model '{model}' at stage '{stage}'.")
+                bar_idx += 1
                 continue
             mean_val = float(np.mean(vals))
             ci_val = ci95_from_scalars(vals.tolist())
-            theta = left_edge + (model_idx + 0.5) * (group_width / n_models)
+            theta = theta_centers[bar_idx]
+            bar_idx += 1
+
+            height = np.clip(mean_val, 0.0, 1.0) * radial_scale
+            y_top = inner_radius + height
+            ci_low = max(0.0, mean_val - ci_val)
+            ci_high = min(1.0, mean_val + ci_val)
+            err_low = (mean_val - ci_low) * radial_scale
+            err_high = (ci_high - mean_val) * radial_scale
             color = global_color_map.get(model, sns.color_palette(palette_name)[0])
             ax.bar(
                 theta,
-                mean_val,
+                height,
+                bottom=inner_radius,
                 width=bar_width,
                 color=color,
-                alpha=0.84,
-                edgecolor="black",
-                linewidth=0.9,
+                alpha=0.92,
+                edgecolor="white",
+                linewidth=0.6,
                 zorder=3,
             )
-            lower_err = min(ci_val, max(mean_val - 0.0, 0.0))
-            upper_err = min(ci_val, max(1.0 - mean_val, 0.0))
             ax.errorbar(
                 theta,
-                mean_val,
-                yerr=np.array([[lower_err], [upper_err]]),
+                y_top,
+                yerr=np.array([[err_low], [err_high]]),
                 fmt="none",
                 ecolor="black",
-                elinewidth=0.9,
-                capsize=2.0,
-                capthick=0.9,
+                elinewidth=0.8,
+                capsize=1.6,
+                capthick=0.8,
                 zorder=4,
             )
+            if show_values:
+                ax.text(
+                    theta,
+                    min(y_top + 0.028, 1.03),
+                    f"{mean_val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8.5,
+                    color="#333333",
+                    rotation=np.degrees(theta) - 90.0,
+                    rotation_mode="anchor",
+                    zorder=5,
+                )
 
-    ax.set_theta_offset(np.pi / 2.0)  # MCC at 12 o'clock
+    ax.set_theta_offset(np.pi / 2.0)  # MCC sector around 12 o'clock
     ax.set_theta_direction(-1)
-    ax.set_xticks(angles)
-    ax.set_xticklabels([METRIC_LABELS.get(m, m.upper()) for m in POLAR_METRIC_ORDER])
-    ax.tick_params(axis="x", pad=14)
-    ax.set_ylim(0.0, 1.0)
-    ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
-    ax.set_yticklabels(["0.2", "0.4", "0.6", "0.8", "1.0"])
-    ax.set_rlabel_position(36) # 36 degrees from top
-    ax.grid(True, alpha=0.24, linewidth=0.8, color="#888888")
+    ax.set_xticks([])
+    ax.set_ylim(0.0, 1.05)
+    tick_values = [0.2, 0.4, 0.6, 0.8, 1.0]
+    tick_positions = [inner_radius + v * radial_scale for v in tick_values]
+    ax.set_yticks(tick_positions)
+    ax.set_yticklabels([f"{v:.1f}" for v in tick_values], fontweight="semibold")
+    ax.set_rlabel_position(36) ## Move radial labels slightly away from the first metric sector
+    ax.grid(True, axis="y", alpha=0.22, linewidth=0.8, color="#777777")
+    ax.grid(False, axis="x")
+    # Emphasize the outer (1.0) ring in black.
+    theta_full = np.linspace(0, 2 * np.pi, 720)
+    ax.plot(theta_full, np.full_like(theta_full, tick_positions[-1]), color="black", linewidth=1.2, zorder=2)
     ax.set_facecolor("white")
-    for tick in ax.get_xticklabels():
-        tick.set_bbox({"facecolor": "white", "edgecolor": "none", "pad": 0.25, "alpha": 1.0})
-        tick.set_zorder(5)
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_linewidth(1.1)
+    ax.spines["polar"].set_visible(False)
+
+    # Inner ring and segmented arcs with metric labels next to each arc.
+    inner_circle = Circle((0.5, 0.5), 0.150, transform=ax.transAxes, facecolor="white", edgecolor="black", linewidth=1.0, zorder=10)
+    ax.add_artist(inner_circle)
+    for metric, theta in zip(POLAR_METRIC_ORDER, group_centers):
+        arc_span = sector_width * 0.78
+        gap = sector_width * 0.12
+        theta_arc = np.linspace(theta - arc_span / 2.0 + gap, theta + arc_span / 2.0 - gap, 120)
+        r_arc = np.full_like(theta_arc, inner_radius * 1.35)
+        ax.plot(theta_arc, r_arc, color="black", linewidth=1.3, zorder=11)
+        label_text = METRIC_LABELS.get(metric, metric.upper())
+        ax.text(
+            theta,
+            inner_radius * 0.95,
+            label_text,
+            ha="center",
+            va="center",
+            fontsize=12.5,
+            fontweight="semibold",
+            color="black",
+            rotation=0,
+            bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.18, "alpha": 1.0},
+            zorder=12,
+        )
 
     stage_titles = {
         "cv": "Cross-Validation",
         "external": "External Test Set",
     }
     stage_label = stage_titles.get(stage.lower(), stage.replace("_", " ").title())
-    ax.set_title(f"{stage_label} Grouped Circular Bar Chart", pad=18, fontsize=14)
+    ax.set_title(f"{stage_label} Grouped Circular Bar Chart", pad=8, fontsize=14)
     legend_handles = [
         Patch(facecolor=global_color_map[model], edgecolor="black", linewidth=0.8, label=str(model))
         for model in models
@@ -633,7 +697,7 @@ def plot_polar_metric_bars(
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        bbox_to_anchor=(0.50, 0.02),
+        bbox_to_anchor=(0.50, 0.05),
         bbox_transform=fig.transFigure,
         ncol=len(models),
         frameon=True,
@@ -642,7 +706,7 @@ def plot_polar_metric_bars(
         facecolor="white",
         framealpha=1.0,
     )
-    fig.tight_layout(rect=[0.03, 0.06, 0.95, 0.99])
+    fig.tight_layout(rect=[0.03, 0.05, 0.95, 0.99])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, format="svg", dpi=dpi)
     plt.close(fig)
@@ -698,7 +762,16 @@ def main() -> None:
         plot_metric_boxplots(metric_df, metrics, stage, boxplot_path, args.palette, args.dpi, args.font, global_color_map)
         print(f"[OK] Saved {stage} metric boxplots: {boxplot_path}")
         polar_path = output_dir / f"{stage}_polar_metric_bars.svg"
-        plot_polar_metric_bars(metric_df, stage, polar_path, args.palette, args.dpi, args.font, global_color_map)
+        plot_polar_metric_bars(
+            metric_df,
+            stage,
+            polar_path,
+            args.palette,
+            args.dpi,
+            args.font,
+            global_color_map,
+            show_values=args.polar_show_values,
+        )
         print(f"[OK] Saved {stage} polar metric bars: {polar_path}")
 
 

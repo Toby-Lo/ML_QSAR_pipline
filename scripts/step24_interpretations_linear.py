@@ -612,6 +612,11 @@ def plot_only_from_exports(
         "font.size": 10,
         "figure.dpi": dpi,
         "savefig.dpi": dpi,
+        "text.color": "black",
+        "axes.labelcolor": "black",
+        "axes.titlecolor": "black",
+        "xtick.color": "black",
+        "ytick.color": "black",
         "axes.grid": False,
         "axes.spines.top": False,
         "axes.spines.right": False,
@@ -641,6 +646,7 @@ def plot_only_from_exports(
     _save(fig, "A_global_shap_summary_beeswarm")
 
     desc_df = imp_df[imp_df["feature_type"].astype(str).str.lower() == "descriptor"].sort_values("mean_abs_shap", ascending=False).head(20)
+    fp_df_all = imp_df[imp_df["feature_type"].astype(str).str.lower() == "fp"].sort_values("mean_abs_shap", ascending=False).head(20)
     if not desc_df.empty:
         fig, ax = plt.subplots(figsize=(6.8, 5.6))
         y = np.arange(len(desc_df))
@@ -651,6 +657,48 @@ def plot_only_from_exports(
         ax.set_xlabel("Mean |SHAP value|")
         ax.set_title(f"{model_key} | Descriptor Importance Ranking")
         _save(fig, "B_descriptor_importance_ranking")
+
+    # Combined B+C stacked-right chart (top: descriptor, bottom: fingerprint; both positive)
+    if not desc_df.empty and not fp_df_all.empty:
+        n_each = int(min(12, len(desc_df), len(fp_df_all)))
+        desc_top = desc_df.head(n_each).reset_index(drop=True)
+        fp_top = fp_df_all.head(n_each).reset_index(drop=True)
+        fig, ax = plt.subplots(figsize=(9.4, 8.6))
+
+        gap = 0
+        y_desc = np.arange(n_each)
+        y_fp = np.arange(n_each) + n_each + gap
+        desc_vals = desc_top["mean_abs_shap"].to_numpy(dtype=float)
+        fp_vals = fp_top["mean_abs_shap"].to_numpy(dtype=float)
+
+        ax.barh(y_desc, desc_vals, color="#4C72B0", edgecolor="black", linewidth=0.6, label="Descriptor")
+        ax.barh(y_fp, fp_vals, color="#55A868", edgecolor="black", linewidth=0.6, label="Fingerprint")
+
+        ax.set_yticks(np.concatenate([y_desc, y_fp]))
+        ax.set_yticklabels(
+            desc_top["feature_display"].astype(str).tolist() + fp_top["feature_display"].astype(str).tolist()
+        )
+        ax.invert_yaxis()
+        ax.margins(y=0.01)
+        ax.set_ylim(y_fp[-1] + 0.45, -0.45)
+        max_abs = float(max(np.max(desc_vals), np.max(fp_vals)))
+        min_pos = float(min(np.min(desc_vals), np.min(fp_vals)))
+        # Dynamic axis compression: keep a small, data-adaptive headroom only.
+        right_pad = max(0.0015, 0.06 * max_abs)
+        left_pad = max(0.0, min_pos - max(0.001, 0.02 * max_abs))
+        ax.set_xlim(left_pad, max_abs + right_pad)
+        ax.set_xlabel("Mean |SHAP value|")
+        ax.set_title(f"{model_key} | Descriptor and Fingerprint Importance Ranking")
+        #ax.text(0.02, 0.98, "(B) Descriptor", transform=ax.transAxes, ha="left", va="top", fontsize=10)
+        #ax.text(0.02, 0.48, "(C) Fingerprint", transform=ax.transAxes, ha="left", va="top", fontsize=10)
+        ax.legend(loc="lower right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1.0)
+
+        fig.tight_layout()
+        _save(fig, "BC_stacked_descriptor_fp")
 
     if fp_demasked_path.exists():
         fp_df = pd.read_csv(fp_demasked_path).head(20)
@@ -689,6 +737,66 @@ def plot_only_from_exports(
         fig = plt.figure(figsize=(8.2, 5.2))
         explanation = shap.Explanation(values=contrib, base_values=base_value, data=X[sample_idx], feature_names=feature_display)
         shap.plots.waterfall(explanation, max_display=10, show=False)
+        # SHAP may create multiple axes/text artists and override styles; enforce final bounds/colors.
+        vertical_text_tokens = {"|", "│", "┃", "┆", "┇"}
+        for ax_w in fig.axes:
+            try:
+                left, _ = ax_w.get_xlim()
+                ax_w.set_xlim(left, 1.0)
+                ax_w.set_autoscalex_on(False)
+            except Exception:
+                pass
+            try:
+                ax_w.tick_params(axis="both", colors="black")
+                ax_w.xaxis.label.set_color("black")
+                ax_w.yaxis.label.set_color("black")
+                ax_w.title.set_color("black")
+                for lbl in ax_w.get_xticklabels() + ax_w.get_yticklabels():
+                    lbl.set_color("black")
+            except Exception:
+                pass
+            try:
+                # Force all line artists to a consistent black style.
+                for ln in ax_w.lines:
+                    ln.set_color("black")
+                    ln.set_linewidth(0.8)
+            except Exception:
+                pass
+            try:
+                # SHAP may draw the f(x) marker as LineCollection segments.
+                for coll in ax_w.collections:
+                    if hasattr(coll, "set_color"):
+                        coll.set_color("black")
+                    if hasattr(coll, "set_edgecolor"):
+                        coll.set_edgecolor("black")
+                    if hasattr(coll, "set_linewidth"):
+                        coll.set_linewidth(0.8)
+            except Exception:
+                pass
+            try:
+                ax_w.spines["top"].set_visible(False)
+                ax_w.spines["right"].set_visible(False)
+            except Exception:
+                pass
+        for txt in fig.texts:
+            try:
+                t = str(txt.get_text()).strip()
+                if t in vertical_text_tokens:
+                    txt.set_visible(False)
+                else:
+                    txt.set_color("black")
+            except Exception:
+                pass
+        for ax_w in fig.axes:
+            for txt in ax_w.texts:
+                try:
+                    t = str(txt.get_text()).strip()
+                    if t in vertical_text_tokens:
+                        txt.set_visible(False)
+                    else:
+                        txt.set_color("black")
+                except Exception:
+                    pass
         plt.title(f"{model_key} | Local Waterfall | id={ids[sample_idx]}", fontsize=11, pad=10)
         plt.tight_layout()
         _save(fig, "D_local_waterfall")
