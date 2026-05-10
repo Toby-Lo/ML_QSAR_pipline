@@ -59,6 +59,16 @@ Usage (CLI):
 Usage (interactive):
   1) Run the compute/export block (CLI or Jupyter cell)
   2) Then uncomment the plotting cells below to iterate on visualizations without recomputing
+
+Plot Only
+python scripts/step22_applicability_domain.py \
+  --run-dir models_out/qsar_ml_20260412_162829 \
+  --split-seed 12345 \
+  --model SVC \
+  --plot-only 
+  
+ 
+  --plot-input-dir models_out/qsar_ml_20260412_162829/split_seed_12345/validation/applicability_domain/SVC/seed_12345
 """
 
 # %%
@@ -1809,11 +1819,438 @@ def compute_and_export(config: ADConfig) -> Dict[str, Any]:
 
 
 # %%
+def _resolve_ad_output_dir(run_dir: Path, split_seed: int, model_key: str, output_dir: Optional[Path]) -> Path:
+    if output_dir is not None:
+        return Path(output_dir)
+    return run_dir / f"split_seed_{split_seed}" / "validation" / "applicability_domain" / str(model_key) / f"seed_{split_seed}"
+
+
+def generate_publication_plots(ad_out_dir: Path) -> List[str]:
+    from matplotlib import pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+    from scipy.stats import gaussian_kde
+
+    ad_out_dir = Path(ad_out_dir).expanduser().resolve()
+    ad_csv = ad_out_dir / "ad_external_predictions.csv"
+    plot_npz = ad_out_dir / "ad_plot_data.npz"
+    summary_path = ad_out_dir / "ad_summary.json"
+    cal_curve_path = ad_out_dir / "ad_calibration_curve.csv"
+
+    if not ad_csv.exists():
+        raise FileNotFoundError(f"Missing required file: {ad_csv}")
+
+    df = pd.read_csv(ad_csv)
+    plot_data = dict(np.load(plot_npz, allow_pickle=True)) if plot_npz.exists() else {}
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    cal_df = pd.read_csv(cal_curve_path) if cal_curve_path.exists() else None
+
+    def _col(names: List[str], dtype=None):
+        for name in names:
+            if name in df.columns:
+                vals = df[name].to_numpy(copy=False)
+                return vals.astype(dtype, copy=False) if dtype is not None else vals
+        return None
+
+    def _save_svg(fig, name: str) -> str:
+        out = ad_out_dir / name
+        fig.savefig(out, format="svg", bbox_inches="tight")
+        plt.close(fig)
+        return str(out)
+
+    def _save_csv(df_out: pd.DataFrame, name: str) -> str:
+        out = ad_out_dir / name
+        df_out.to_csv(out, index=False)
+        return str(out)
+
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif", "Times"],
+        "font.size": 10.5,
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        "axes.linewidth": 1.0,
+        "axes.grid": False,
+        "legend.frameon": True,
+        "legend.fancybox": False,
+        "legend.edgecolor": "black",
+        "legend.framealpha": 1.0,
+        "svg.fonttype": "none",
+    })
+    c_train, c_in, c_out = "#7f8c8d", "#1f77b4", "#d62728"
+
+    in_domain = _col(["In_Domain", "in_domain"], dtype=bool)
+    if in_domain is None and "in_domain" in plot_data:
+        in_domain = np.asarray(plot_data["in_domain"]).astype(bool)
+    if in_domain is None:
+        in_domain = np.ones((len(df),), dtype=bool)
+
+    ad_score = _col(["AD_Score", "ad_score"])
+    if ad_score is None and "ad_score" in plot_data:
+        ad_score = np.asarray(plot_data["ad_score"])
+    if ad_score is None:
+        raise ValueError("Cannot find AD score in outputs.")
+
+    leverage = _col(["Leverage", "leverage"])
+    if leverage is None and "leverage" in plot_data:
+        leverage = np.asarray(plot_data["leverage"])
+    std_resid = _col(["StdResidual", "std_resid"])
+    if std_resid is None and "std_resid" in plot_data:
+        std_resid = np.asarray(plot_data["std_resid"])
+    tanimoto = _col(["Tanimoto_max", "tanimoto_max"])
+    density_score = _col(["Density_Score", "density_score"])
+    error = _col(["LogLoss", "log_loss", "AbsProbError", "abs_prob_error"])
+    prob = _col(["y_prob_calibrated", "calibrated_prob", "y_prob", "prob", "qsar_prob"])
+    if prob is None:
+        prob = np.zeros((len(df),), dtype=float)
+    y_true = _col(["y_true", "Y_true", "label"])
+    if error is None and y_true is not None and prob is not None and len(y_true) == len(prob):
+        # Fallback error for analysis CSVs if explicit error columns are missing.
+        error = np.abs(np.asarray(y_true, dtype=np.float64) - np.asarray(prob, dtype=np.float64))
+
+    h_star = None
+    h_star_col = _col(["Leverage_h_star", "h_star"])
+    if h_star_col is not None:
+        uniq = pd.unique(pd.Series(h_star_col).dropna())
+        if len(uniq) == 1:
+            h_star = float(uniq[0])
+    if h_star is None and isinstance(summary, dict):
+        try:
+            h_star = float(summary.get("h_star"))
+        except Exception:
+            h_star = None
+
+    exported: List[str] = []
+
+    tr_emb, te_emb = None, None
+    if "X_train_base_scaled" in plot_data and "X_ext_base_scaled" in plot_data:
+        Xtr = np.asarray(plot_data["X_train_base_scaled"], dtype=np.float64)
+        Xte = np.asarray(plot_data["X_ext_base_scaled"], dtype=np.float64)
+        from sklearn.manifold import TSNE
+        tsne = TSNE(
+            n_components=2,
+            perplexity=30,
+            init="pca",
+            learning_rate="auto",
+            random_state=42,
+        )
+        emb = tsne.fit_transform(np.vstack([Xtr, Xte]))
+        tr = emb[: len(Xtr)]
+        te = emb[len(Xtr):]
+        tr_emb, te_emb = tr, te
+        fig, ax = plt.subplots(figsize=(5.0, 4.1), constrained_layout=True)
+        ax.scatter(tr[:, 0], tr[:, 1], s=8, alpha=0.20, color=c_train, label="Training")
+        ax.scatter(te[in_domain, 0], te[in_domain, 1], s=24, alpha=0.78, color=c_in, label="External in-domain")
+        ax.scatter(te[~in_domain, 0], te[~in_domain, 1], s=16, alpha=0.72, color=c_out, marker="D", label="External out-of-domain")
+        ax.set_xlabel("t-SNE-1")
+        ax.set_ylabel("t-SNE-2")
+        ax.set_title("A. t-SNE Projection of AD Space")
+        ax.legend(loc="best", fontsize=8)
+        exported.append(_save_svg(fig, "FigureX_A.svg"))
+
+    fig, ax = plt.subplots(figsize=(4.7, 3.8), constrained_layout=True)
+    ax.hist(ad_score[in_domain], bins=18, alpha=0.60, color=c_in, label="In-domain", density=True)
+    ax.hist(ad_score[~in_domain], bins=18, alpha=0.45, color=c_out, label="Out-of-domain", density=True)
+    ax.axvline(float(np.mean(ad_score)), color="black", linestyle="--", linewidth=1.0, alpha=0.8, label="Mean AD score")
+    ax.set_xlabel("AD Score")
+    ax.set_ylabel("Density")
+    ax.set_title("B. Distribution of AD Scores")
+    ax.legend(loc="best", fontsize=8)
+    exported.append(_save_svg(fig, "FigureX_B.svg"))
+
+    if cal_df is not None and {"ad_mean", "error_mean", "error_std"}.issubset(cal_df.columns):
+        fig, ax = plt.subplots(figsize=(4.8, 3.8), constrained_layout=True)
+        ax.errorbar(
+            cal_df["ad_mean"], cal_df["error_mean"], yerr=cal_df["error_std"],
+            fmt="o-", capsize=3, markersize=4.5, linewidth=1.3, color=c_in, ecolor="#7f8c8d"
+        )
+        ax.fill_between(
+            cal_df["ad_mean"],
+            cal_df["error_mean"] - cal_df["error_std"],
+            cal_df["error_mean"] + cal_df["error_std"],
+            color=c_in, alpha=0.15,
+        )
+        ax.set_xlabel("AD Score")
+        ax.set_ylabel("Mean LogLoss")
+        ax.set_title("C. AD Calibration Curve")
+        exported.append(_save_svg(fig, "FigureX_C.svg"))
+    else:
+        fig, ax = plt.subplots(figsize=(4.8, 3.8), constrained_layout=True)
+        ax.scatter(ad_score[in_domain], prob[in_domain], s=20, alpha=0.46, color=c_in, edgecolors="none", label="In-domain")
+        ax.scatter(ad_score[~in_domain], prob[~in_domain], s=14, alpha=0.60, color=c_out, marker="D", edgecolors="white", linewidths=0.3, label="Out-of-domain")
+        ax.set_xlabel("AD Score")
+        ax.set_ylabel("Predicted Probability")
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.0)
+        ax.set_title("C. Calibrated Probability vs AD Score")
+        ax.legend(loc="best", fontsize=8)
+        exported.append(_save_svg(fig, "FigureX_C.svg"))
+
+    if leverage is not None and std_resid is not None:
+        fig, ax = plt.subplots(figsize=(4.8, 3.8), constrained_layout=True)
+        ax.scatter(leverage[in_domain], std_resid[in_domain], s=20, alpha=0.50, color=c_in, edgecolors="none", label="In-domain")
+        ax.scatter(leverage[~in_domain], std_resid[~in_domain], s=15, alpha=0.66, color=c_out, marker="D", edgecolors="white", linewidths=0.3, label="Out-of-domain")
+        if h_star is not None:
+            ax.axvline(float(h_star), color="black", linestyle="--", linewidth=1.1, label=f"h* = {h_star:.3f}")
+        ax.axhline(3.0, color="#8b0000", linestyle=":", linewidth=1.0, label="|residual| = 3")
+        ax.axhline(-3.0, color="#8b0000", linestyle=":", linewidth=1.0)
+        ax.set_xlabel("Leverage (h)")
+        ax.set_ylabel("Standardized deviance residual")
+        ax.set_ylim(-4.0, 4.0)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
+        ax.set_title("D. Williams Plot")
+        ax.legend(loc="best", fontsize=8)
+        exported.append(_save_svg(fig, "FigureX_D.svg"))
+
+    fig, axes = plt.subplots(2, 2, figsize=(9.6, 7.6), constrained_layout=True)
+    panel_labels = ["(A)", "(B)", "(C)", "(D)"]
+    for panel, lab in zip(axes.flat, panel_labels):
+        panel.text(0.02, 0.98, lab, transform=panel.transAxes, ha="left", va="top", fontsize=11, fontweight="bold")
+
+    ax = axes[0, 0]
+    if tr_emb is not None and te_emb is not None:
+        ax.scatter(tr_emb[:, 0], tr_emb[:, 1], s=8, alpha=0.20, color=c_train, label="Training")
+        ax.scatter(te_emb[in_domain, 0], te_emb[in_domain, 1], s=24, alpha=0.78, color=c_in, label="External in-domain")
+        ax.scatter(te_emb[~in_domain, 0], te_emb[~in_domain, 1], s=16, alpha=0.72, color=c_out, marker="D", label="External out-of-domain")
+        ax.set_xlabel("t-SNE-1")
+        ax.set_ylabel("t-SNE-2")
+        ax.legend(loc="best", fontsize=8)
+    else:
+        ax.set_axis_off()
+
+    ax = axes[0, 1]
+    ax.hist(ad_score[in_domain], bins=18, alpha=0.60, color=c_in, label="In-domain", density=True)
+    ax.hist(ad_score[~in_domain], bins=18, alpha=0.45, color=c_out, label="Out-of-domain", density=True)
+    ax.axvline(float(np.mean(ad_score)), color="black", linestyle="--", linewidth=1.0, alpha=0.8, label="Mean AD score")
+    ax.set_xlabel("AD Score")
+    ax.set_ylabel("Density")
+    ax.legend(loc="best", fontsize=8)
+
+    ax = axes[1, 0]
+    if cal_df is not None and {"ad_mean", "error_mean", "error_std"}.issubset(cal_df.columns):
+        ax.errorbar(
+            cal_df["ad_mean"], cal_df["error_mean"], yerr=cal_df["error_std"],
+            fmt="o-", capsize=3, markersize=4.5, linewidth=1.3, color=c_in, ecolor="#7f8c8d"
+        )
+        ax.fill_between(
+            cal_df["ad_mean"],
+            cal_df["error_mean"] - cal_df["error_std"],
+            cal_df["error_mean"] + cal_df["error_std"],
+            color=c_in, alpha=0.15,
+        )
+        ax.set_xlabel("AD Score")
+        ax.set_ylabel("Mean LogLoss")
+    else:
+        ax.scatter(ad_score[in_domain], prob[in_domain], s=20, alpha=0.46, color=c_in, edgecolors="none", label="In-domain")
+        ax.scatter(ad_score[~in_domain], prob[~in_domain], s=14, alpha=0.60, color=c_out, marker="D", edgecolors="white", linewidths=0.3, label="Out-of-domain")
+        ax.set_xlabel("AD Score")
+        ax.set_ylabel("Predicted Probability")
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.0)
+        ax.legend(loc="best", fontsize=8)
+
+    ax = axes[1, 1]
+    if leverage is not None and std_resid is not None:
+        ax.scatter(leverage[in_domain], std_resid[in_domain], s=20, alpha=0.50, color=c_in, edgecolors="none", label="In-domain")
+        ax.scatter(leverage[~in_domain], std_resid[~in_domain], s=15, alpha=0.66, color=c_out, marker="D", edgecolors="white", linewidths=0.3, label="Out-of-domain")
+        if h_star is not None:
+            ax.axvline(float(h_star), color="black", linestyle="--", linewidth=1.1, label=f"h* = {h_star:.3f}")
+        ax.axhline(3.0, color="#8b0000", linestyle=":", linewidth=1.0, label="|residual| = 3")
+        ax.axhline(-3.0, color="#8b0000", linestyle=":", linewidth=1.0)
+        ax.set_xlabel("Leverage (h)")
+        ax.set_ylabel("Standardized deviance residual")
+        ax.set_ylim(-4.0, 4.0)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
+        ax.legend(loc="best", fontsize=8)
+    else:
+        ax.set_axis_off()
+
+    exported.append(_save_svg(fig, "FigureX_ABCD_combined.svg"))
+
+    if density_score is not None and error is not None:
+        fig, ax = plt.subplots(figsize=(4.6, 3.6), constrained_layout=True)
+        ax.scatter(density_score[in_domain], error[in_domain], s=18, alpha=0.45, color=c_in, edgecolors="none")
+        ax.scatter(density_score[~in_domain], error[~in_domain], s=20, alpha=0.65, color=c_out, marker="D", edgecolors="white", linewidths=0.3)
+        ax.set_xlabel("Density Score")
+        ax.set_ylabel("Prediction Error")
+        ax.set_title("Supplementary S1. Density Score vs Error")
+        exported.append(_save_svg(fig, "FigureS1_density_vs_error.svg"))
+
+    if tanimoto is not None and error is not None:
+        fig, ax = plt.subplots(figsize=(4.6, 3.6), constrained_layout=True)
+        ax.scatter(tanimoto[in_domain], error[in_domain], s=18, alpha=0.45, color=c_in, edgecolors="none")
+        ax.scatter(tanimoto[~in_domain], error[~in_domain], s=20, alpha=0.65, color=c_out, marker="D", edgecolors="white", linewidths=0.3)
+        ax.set_xlabel("Max Tanimoto Similarity")
+        ax.set_ylabel("Prediction Error")
+        ax.set_title("Supplementary S2. Similarity vs Error")
+        exported.append(_save_svg(fig, "FigureS2_similarity_vs_error.svg"))
+
+    if error is not None:
+        fig, ax = plt.subplots(figsize=(4.8, 3.6), constrained_layout=True)
+        err_in = np.asarray(error)[in_domain]
+        err_out = np.asarray(error)[~in_domain]
+        if len(err_in) > 2:
+            kde_in = gaussian_kde(err_in)
+            xs_in = np.linspace(float(np.min(err_in)), float(np.max(err_in)), 160)
+            ax.plot(xs_in, kde_in(xs_in), color=c_in, linewidth=1.8, label="In-domain")
+        if len(err_out) > 2:
+            kde_out = gaussian_kde(err_out)
+            xs_out = np.linspace(float(np.min(err_out)), float(np.max(err_out)), 160)
+            ax.plot(xs_out, kde_out(xs_out), color=c_out, linewidth=1.8, label="Out-of-domain")
+        ax.set_xlabel("Prediction Error")
+        ax.set_ylabel("Density")
+        ax.set_title("Supplementary S3. Error Distribution")
+        ax.legend(loc="best", fontsize=8)
+        exported.append(_save_svg(fig, "FigureS3_error_distribution.svg"))
+
+    fig, ax = plt.subplots(figsize=(3.8, 3.4), constrained_layout=True)
+    counts = [int(np.sum(in_domain)), int(np.sum(~in_domain))]
+    labels = ["In-domain", "Out-of-domain"]
+    bars = ax.bar(labels, counts, color=[c_in, c_out], edgecolor="white", linewidth=0.8)
+    n_total = max(1, int(len(in_domain)))
+    ymax = max(counts) if counts else 1
+    for bar, c in zip(bars, counts):
+        pct = 100.0 * c / n_total
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            bar.get_height() + ymax * 0.01,
+            f"{pct:.1f}%",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+    ax.set_ylim(0, ymax * 1.08)
+    ax.set_ylabel("Number of compounds")
+    ax.set_title("Supplementary S4. AD Coverage")
+    exported.append(_save_svg(fig, "FigureS4_ad_coverage.svg"))
+
+    fig, ax = plt.subplots(figsize=(4.8, 3.6), constrained_layout=True)
+    ax.scatter(ad_score[in_domain], prob[in_domain], s=20, alpha=0.46, color=c_in, edgecolors="none", label="In-domain")
+    ax.scatter(ad_score[~in_domain], prob[~in_domain], s=14, alpha=0.60, color=c_out, marker="D", edgecolors="white", linewidths=0.3, label="Out-of-domain")
+    ax.set_xlabel("AD Score")
+    ax.set_ylabel("Predicted Probability")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title("Supplementary S5. Calibrated Probability vs AD Score")
+    ax.legend(loc="best", fontsize=8)
+    exported.append(_save_svg(fig, "FigureS5_prob_vs_ad_score.svg"))
+
+    if cal_df is not None and {"ad_mean", "error_mean", "error_std"}.issubset(cal_df.columns):
+        fig, ax = plt.subplots(figsize=(4.8, 3.6), constrained_layout=True)
+        ax.errorbar(
+            cal_df["ad_mean"], cal_df["error_mean"], yerr=cal_df["error_std"],
+            fmt="o-", capsize=3, markersize=4.5, linewidth=1.3, color=c_in, ecolor="#7f8c8d"
+        )
+        ax.fill_between(
+            cal_df["ad_mean"],
+            cal_df["error_mean"] - cal_df["error_std"],
+            cal_df["error_mean"] + cal_df["error_std"],
+            color=c_in, alpha=0.15,
+        )
+        ax.set_xlabel("AD Score")
+        ax.set_ylabel("Mean LogLoss")
+        ax.set_title("Supplementary S6. AD Calibration Curve")
+        exported.append(_save_svg(fig, "FigureS6_ad_calibration_curve.svg"))
+
+    # Analysis-1: threshold robustness table (current outputs only).
+    if error is not None:
+        ad_arr = np.asarray(ad_score, dtype=np.float64)
+        err_arr = np.asarray(error, dtype=np.float64)
+        finite_mask = np.isfinite(ad_arr) & np.isfinite(err_arr)
+        ad_arr = ad_arr[finite_mask]
+        err_arr = err_arr[finite_mask]
+        n_all = len(ad_arr)
+        if n_all > 0:
+            thresholds = sorted({
+                0.35,
+                0.40,
+                0.45,
+                float(np.quantile(ad_arr, 0.60)),
+                float(np.quantile(ad_arr, 0.70)),
+                float(np.quantile(ad_arr, 0.80)),
+            })
+            rows: List[Dict[str, Any]] = []
+            for thr in thresholds:
+                in_m = ad_arr >= thr
+                out_m = ~in_m
+                n_in = int(np.sum(in_m))
+                n_out = int(np.sum(out_m))
+                rows.append({
+                    "ad_threshold": float(thr),
+                    "n_total": int(n_all),
+                    "n_in_domain": n_in,
+                    "n_out_domain": n_out,
+                    "coverage_in_domain": float(n_in / n_all),
+                    "mean_error_in_domain": float(np.mean(err_arr[in_m])) if n_in else np.nan,
+                    "mean_error_out_domain": float(np.mean(err_arr[out_m])) if n_out else np.nan,
+                    "error_gap_out_minus_in": (
+                        float(np.mean(err_arr[out_m]) - np.mean(err_arr[in_m])) if (n_in and n_out) else np.nan
+                    ),
+                })
+            exported.append(_save_csv(pd.DataFrame(rows), "AD_threshold_robustness.csv"))
+
+    # Analysis-2: AD-bin statistics with sample size and bootstrap 95% CI.
+    if error is not None:
+        ad_arr = np.asarray(ad_score, dtype=np.float64)
+        err_arr = np.asarray(error, dtype=np.float64)
+        finite_mask = np.isfinite(ad_arr) & np.isfinite(err_arr)
+        ad_arr = ad_arr[finite_mask]
+        err_arr = err_arr[finite_mask]
+        n_all = len(ad_arr)
+        if n_all > 0:
+            q = np.quantile(ad_arr, np.linspace(0.0, 1.0, 11))
+            q = np.unique(q)
+            rng = np.random.default_rng(42)
+            rows: List[Dict[str, Any]] = []
+            for i in range(len(q) - 1):
+                lo, hi = float(q[i]), float(q[i + 1])
+                if i == len(q) - 2:
+                    m = (ad_arr >= lo) & (ad_arr <= hi)
+                else:
+                    m = (ad_arr >= lo) & (ad_arr < hi)
+                vals = err_arr[m]
+                n_bin = int(len(vals))
+                if n_bin == 0:
+                    continue
+                mean_v = float(np.mean(vals))
+                std_v = float(np.std(vals, ddof=1)) if n_bin > 1 else 0.0
+                if n_bin > 1:
+                    bs = rng.choice(vals, size=(1000, n_bin), replace=True).mean(axis=1)
+                    ci_low, ci_high = float(np.quantile(bs, 0.025)), float(np.quantile(bs, 0.975))
+                else:
+                    ci_low, ci_high = mean_v, mean_v
+                rows.append({
+                    "bin_index": int(i + 1),
+                    "ad_min": lo,
+                    "ad_max": hi,
+                    "ad_mean": float(np.mean(ad_arr[m])),
+                    "n": n_bin,
+                    "fraction": float(n_bin / n_all),
+                    "error_mean": mean_v,
+                    "error_std": std_v,
+                    "error_ci95_low": ci_low,
+                    "error_ci95_high": ci_high,
+                })
+            exported.append(_save_csv(pd.DataFrame(rows), "AD_binned_error_stats_with_ci.csv"))
+
+    return exported
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Applicability Domain analysis for step10 QSAR runs")
     p.add_argument("--run-dir", type=Path, help="Run directory (models_out/qsar_ml_YYYYMMDD_HHMMSS). Defaults to latest.")
     p.add_argument("--split-seed", type=int, required=True, help="Split seed (corresponds to split_seed_<N> folder)")
     p.add_argument("--model", required=True, help="Model key (e.g. SVC, ETC, XGBC, RFC, LR, MLP)")
+    p.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Generate publication/SI SVG figures from existing AD outputs only (no AD recomputation).",
+    )
+    p.add_argument(
+        "--plot-input-dir",
+        type=Path,
+        default=None,
+        help="Path containing ad_external_predictions.csv and related AD outputs. Defaults to resolved AD output dir.",
+    )
 
     p.add_argument("--train-npz", type=Path, help="Override dev_train.npz path")
     p.add_argument("--external-npz", type=Path, help="Override external_test.npz path")
@@ -1958,6 +2395,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     run_dir = args.run_dir or _resolve_latest_run_dir()
+
+    if bool(args.plot_only):
+        plot_dir = args.plot_input_dir or _resolve_ad_output_dir(
+            run_dir=run_dir,
+            split_seed=int(args.split_seed),
+            model_key=str(args.model),
+            output_dir=args.output_dir,
+        )
+        exports = generate_publication_plots(plot_dir)
+        print("[OK] Plot-only export complete (SVG + CSV)")
+        print(f"  - Input dir: {plot_dir}")
+        print(f"  - Exported files: {len(exports)}")
+        for pth in exports:
+            print(f"    - {pth}")
+        return
 
     cfg = ADConfig(
         run_dir=run_dir,
@@ -2255,9 +2707,7 @@ if _in_ipython():
         )
         if h_star is not None:
             ax.axvline(x=float(h_star), color="red", linestyle="--", linewidth=1.5, alpha=0.8, label=f"h* = {h_star:.3f}")
-        ax.axhline(y=2, color="purple", linestyle="--", linewidth=1.2, alpha=0.7, label="±2σ")
-        ax.axhline(y=-2, color="purple", linestyle="--", linewidth=1.2, alpha=0.7)
-        ax.axhline(y=3, color="darkred", linestyle=":", linewidth=1.0, alpha=0.6, label="±3σ")
+        ax.axhline(y=3, color="darkred", linestyle=":", linewidth=1.0, alpha=0.6, label="|residual| = 3")
         ax.axhline(y=-3, color="darkred", linestyle=":", linewidth=1.0, alpha=0.6)
         ax.set_xlabel("Leverage ($h$)")
         ax.set_ylabel("Std. deviance residual")
