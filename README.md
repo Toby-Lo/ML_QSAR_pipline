@@ -151,6 +151,14 @@ Step35 merges ADMETlab 3.0 endpoint predictions and computes:
 
 ## Scripts
 
+Naming convention:
+- `stepXX_*.py`: `XX` indicates pipeline stage order.
+- `step01-02`: dataset curation and exploratory analysis.
+- `step10-11`: core QSAR model training and cross-seed summary.
+- `step20-25`: calibration, robustness, AD analysis, and interpretation.
+- `step30-35`: virtual screening, AD-aware ranking, and ADMET-aware prioritization.
+- `step40-42`: figure generation and screening-result visualization.
+
 ### Data Preparation
 
 #### `scripts/step01_data_cleaning.py`
@@ -253,6 +261,11 @@ Step35 merges ADMETlab 3.0 endpoint predictions and computes:
 - What it does: plots threshold-dependent ROC, PR, F1, and MCC curves for selected models/seeds.
 - Simple usage: `python scripts/step41_threshold_analysis.py --base-dir models_out/qsar_ml_YYYYMMDD_HHMMSS --model SVC --seed 42`
 
+#### `scripts/step42_vs_visualization.py`
+
+- What it does: builds publication-style virtual screening funnel figures (stage attrition + score distributions) and exports stage-count/summary tables.
+- Simple usage: `python scripts/step42_vs_visualization.py --run-dir models_out/qsar_ml_YYYYMMDD_HHMMSS`
+
 ## Input and Output Notes
 
 - Training data are expected as CSV or Parquet tables with SMILES, labels, and optionally precomputed feature columns.
@@ -271,5 +284,5 @@ step01 -> step10 -> step20 -> step21 -> step22 -> step23/24/25 -> step40/41
 For virtual screening:
 
 ```bash
-step30 -> step31 -> step32 -> step33 -> step34 -> (optional) step35
+step30 -> step31 -> step32 -> step33 -> step34 -> (optional) step35 -> step42
 ```
