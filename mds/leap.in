@@ -1,0 +1,16 @@
+source leaprc.protein.ff19SB
+source leaprc.gaff2
+source leaprc.water.opc
+loadamberparams frcmod.ionslm_126_opc
+loadAmberParams ligand.frcmod
+LIG=loadmol2 ligand_clean.mol2
+receptor=loadPDB protein_clean.pdb
+complex=combine {receptor LIG}
+set default PBRadii mbondi3
+addions complex NA 0
+addions complex CL 0
+savepdb complex complex_No_WAT.pdb
+solvateoct complex OPCBOX 12.0
+saveAmberParm complex complex.parm7 complex.rst7
+savepdb complex complex_WAT.pdb
+quit

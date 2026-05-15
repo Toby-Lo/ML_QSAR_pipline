@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo -n "CLEANING PROTEIN Started at: "
+date
+date
+pdb4amber -i protein.pdb -o protein_clean.pdb
+echo -n "CLEANING PROTEIN finished at: "
+date
+echo -n "CLEANING LIGAND Started at: "
+date
+pdb4amber -i ligand.pdb -o ligand_clean.pdb
+echo -n "CLEANING LIGAND finished at: "
+date
+echo -n "LIGAND MOL2 CONVERSION Started at: "
+date
+antechamber -i ligand_clean.pdb -fi pdb -o ligand_clean.mol2 -fo mol2 -at gaff2 -c bcc -s 2   # if ligand net charge != 0, add: -nc <integer>
+echo -n "LIGAND MOL2 CONVERSION finished at: "
+date
+echo -n "LIGAND FRCMOD Started at: "
+date
+parmchk2 -i ligand_clean.mol2 -f mol2 -o ligand.frcmod
+echo -n "LIGAND MOL2 CONVERSION finished at: "
+date
+echo -n "TOPOLOGY Started at: "
+date
+tleap -s -f leap.in
+echo -n "TOPOLOGY finished at: "
+date
+echo "TOPOLOGY DONE"

@@ -1,0 +1,10 @@
+#!/bin/csh
+echo "pearl Script Started"
+perl sham.pl -i1 6MOJ_MODE1.xvg -i2 6MOJ_MODE2.xvg -data1 . 1 -DATA2 . 1 -o gsham_input.xvg
+echo "GMX Script Started"
+gmx sham -f gsham_input.xvg -ls Free-Energy-Landscape.xpm
+echo "Python Script Started"
+python2.7 xpm2txt.py -f Free-Energy-Landscape.xpm -o Free-Energy-Landscape.txt
+echo "FEL DONE"
+
+#provide the projection 1 and 2 data from create-fel-MODES.in

@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing command: $1 (is AMBER sourced/loaded?)" >&2
+    exit 127
+  fi
+}
+
+need_cmd pmemd.cuda
+need_cmd cpptraj
+
+echo "=== STARTING SIMULATION WORKFLOW ==="
+date
+# Step 1: Minimization 1 (with restraints)
+echo "[1] Minimization 1"
+ pmemd.cuda -O -i min1.in -o min1.out -p complex.parm7 -c complex.rst7 -r min1.rst7 -ref complex.rst7 -inf min1.mdinfo
+
+# Step 2: Minimization 2 (no restraints)
+echo "[2] Minimization 2"
+ pmemd.cuda -O -i min2.in -o min2.out -p complex.parm7 -c min1.rst7 -r min2.rst7 -inf min2.mdinfo
+
+# Step 3: Heating
+echo "[3] Heating"
+ pmemd.cuda -O -i heat.in -o heat.out -p complex.parm7 -c min2.rst7 -r heat.rst7 -x heat.nc -ref min2.rst7 -inf heat.mdinfo
+
+# Step 4: Density Equilibration (with restraints)
+echo "[4] Density Equilibration"
+ pmemd.cuda -O -i density.in -o density.out -p complex.parm7 -c heat.rst7 -r density.rst7 -x density.nc -ref heat.rst7 -inf density.mdinfo
+
+# Step 5: Unrestrained Equilibration (2 ns)
+echo "[5] Unrestrained NPT Equilibration"
+ pmemd.cuda -O -i equil.in -o equil.out -p complex.parm7 -c density.rst7 -r equil.rst7 -x equil.nc -inf equil.mdinfo
+
+# Step 6: Classical MD Production (200 ns)
+echo "[6] Classical MD Production"
+ pmemd.cuda -O -i cMD-prod.in -o cMD-prod.out -p complex.parm7 -c equil.rst7 -r cMD-Prod.rst7 -x cMD-Prod.nc -inf cMD-Prod.mdinfo
+
+sleep 5s
+cpptraj -i Auto-image.in
+echo "=== SIMULATION WORKFLOW COMPLETED ==="
+date

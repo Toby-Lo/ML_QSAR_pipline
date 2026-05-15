@@ -1,0 +1,17 @@
+NPT Equilibration with Moderate Restraints
+&cntrl
+  imin=0, irest=1, ntx=5,
+  nstlim=50000, dt=0.002,
+  ntc=2, ntf=2,
+  cut=10.0,
+  ntb=2, ntp=1, barostat=2, taup=1.0,
+  ntt=3, gamma_ln=2.0, temp0=300.0,
+  ioutfm=1, ntxo=2,
+  ig=-1,
+  ntpr=500, ntwx=500, ntwr=5000,
+  nscm=1000,
+  ntr=1,
+  restraintmask=':1-319 & !@H=',
+  restraint_wt=2.0,
+  vlimit=20
+/

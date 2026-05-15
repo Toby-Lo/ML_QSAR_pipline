@@ -1,0 +1,9 @@
+Full System Minimization without Restraints
+&cntrl
+  imin=1, maxcyc=10000, ncyc=5000,
+  cut=10.0,
+  ntb=1,
+  ntc=2, ntf=2,
+  ntpr=100,
+  ntr=0
+/

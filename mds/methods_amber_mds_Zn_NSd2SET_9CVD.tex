@@ -1,0 +1,81 @@
+\section{Molecular dynamics (AMBER) and Zn site treatment}
+\label{sec:md-amber-zn}
+
+\subsection{System and force fields}
+All simulations were prepared and run with the AMBER software suite (Amber24/pmemd.cuda; AmberTools25). Protein parameters were assigned using ff19SB, the ligand was parameterized with GAFF2, and explicit solvent was modeled with the OPC water model. Ion parameters were taken from the Joung--Cheatham ion set for OPC (frcmod.ionslm\_126\_opc). Nonbonded interactions used a 10~\AA{} cutoff.
+
+\subsection{Input structure cleanup and ligand parameterization}
+The receptor and ligand structures were standardized with \texttt{pdb4amber}. The ligand was converted to MOL2 and assigned AM1-BCC partial charges using \texttt{antechamber}, and missing force-field terms were generated using \texttt{parmchk2}. A representative command sequence is:
+\begin{verbatim}
+pdb4amber -i protein.pdb -o protein_clean.pdb
+antechamber -i ligand.mol2 -fi mol2 -o ligand_clean.mol2 -fo mol2 \
+  -at gaff2 -c bcc -s 2 -nc <NET_CHARGE>
+parmchk2 -i ligand_clean.mol2 -f mol2 -o ligand.frcmod
+\end{verbatim}
+
+\subsection{Identification of Zn coordination environment}
+The NSD2 SET-domain structure (PDB ID: 9CVD) contains three structural Zn sites with Cys coordination. Zn--neighbor analysis (3.0~\AA{} cutoff) identified:
+\begin{itemize}
+  \item \textbf{Zn site 1 (single Zn):} ZN residue 221 coordinated by Cys residues 161, 208, 210, 215 (SG donors).
+  \item \textbf{Zn site 2 (binuclear cluster):} ZN residues 222 and 223 coordinated by Cys residues 33, 35, 43, 49 and 43, 58, 63, 69 (SG donors), with Cys43 contacting both metals.
+\end{itemize}
+Because such Zn--Cys$_4$ motifs are structural and their geometry is not reliably preserved by a purely nonbonded Zn$^{2+}$ model, a bonded model was constructed (below).
+
+\subsection{Preparation of deprotonated thiolates (CYM)}
+Coordinating cysteines were treated as deprotonated thiolates (AMBER residue name \texttt{CYM}) prior to metal-site parameterization. In practice, residue names for the identified coordinating Cys residues were changed from \texttt{CYS} to \texttt{CYM} in the cleaned PDB, yielding \texttt{protein\_clean\_ZnCYM.pdb}. This ensures the correct formal charge and chemistry for Zn--S coordination.
+
+\subsection{Zn bonded model generation with MCPB.py (empirical 2e workflow)}
+Metal-site bonded parameters were generated using MCPB.py (Version 2024) under AmberTools25. Two MCPB groups were built:
+\begin{enumerate}
+  \item \texttt{ZN221\_CYS4}: a mononuclear Zn--Cys$_4$ site for residue 221.
+  \item \texttt{ZN222\_ZN223\_cluster}: a binuclear Zn cluster for residues 222 and 223 including the shared thiolate (Cys43).
+\end{enumerate}
+For each group, MCPB step~1 (\texttt{-s 1}) generated small/standard/large model files and fingerprints. A Zn$^{2+}$ MOL2 file (\texttt{ZN.mol2}) was provided via \texttt{ion\_mol2files}; importantly, the MOL2 formatting was kept minimal but strict (no blank lines in sections) to satisfy the MCPB/pymsmt parser.
+
+Because a full QM Hessian-based Seminario workflow (\texttt{-s 2}) requires external QM outputs (e.g., Gaussian \texttt{.fchk}), we used the Zn-specific empirical option recommended by the MCPB.py documentation: step \texttt{2e}. This yields metal--ligand bond/angle parameters from empirical relationships without requiring Gaussian/GAMESS frequency calculations.
+\begin{verbatim}
+# Example for site 1:
+MCPB.py -i mcpb.in -s 1
+MCPB.py -i mcpb.in -s 2e
+\end{verbatim}
+This produced the final frcmod files:
+\begin{itemize}
+  \item \texttt{mcpb\_zn/site1\_ZN221/ZN221\_CYS4\_mcpbpy.frcmod}
+  \item \texttt{mcpb\_zn/site23\_ZN222\_ZN223/ZN222\_ZN223\_cluster\_mcpbpy.frcmod}
+\end{itemize}
+
+\subsection{Topology building with tleap (including Zn bonded parameters)}
+The complex was assembled in \texttt{tleap} by loading ff19SB/GAFF2/OPC, ligand parameters, and the MCPB-generated Zn frcmod files before reading the (CYM-updated) protein PDB:
+\begin{verbatim}
+source leaprc.protein.ff19SB
+source leaprc.gaff2
+source leaprc.water.opc
+loadamberparams frcmod.ionslm_126_opc
+loadAmberParams ligand.frcmod
+LIG=loadmol2 ligand_clean.mol2
+loadAmberParams mcpb_zn/site1_ZN221/ZN221_CYS4_mcpbpy.frcmod
+loadAmberParams mcpb_zn/site23_ZN222_ZN223/ZN222_ZN223_cluster_mcpbpy.frcmod
+receptor=loadPDB protein_clean_ZnCYM.pdb
+complex=combine {receptor LIG}
+addions complex NA 0
+addions complex CL 0
+solvateoct complex OPCBOX 12.0
+saveAmberParm complex complex.parm7 complex.rst7
+\end{verbatim}
+The resulting \texttt{complex.parm7} and \texttt{complex.rst7} were used for MD.
+
+\subsection{MD protocol}
+Simulation inputs followed a standard restrained equilibration protocol:
+\begin{itemize}
+  \item \textbf{Minimization~1:} 10{,}000 cycles with positional restraints on protein heavy atoms (10~kcal$\cdot$mol$^{-1}\cdot$\AA$^{-2}$).
+  \item \textbf{Minimization~2:} 10{,}000 cycles without restraints.
+  \item \textbf{Heating (NVT):} 0$\rightarrow$300~K over 50~ps with restraints (5~kcal$\cdot$mol$^{-1}\cdot$\AA$^{-2}$).
+  \item \textbf{Density equilibration (NPT):} 100~ps with restraints (2~kcal$\cdot$mol$^{-1}\cdot$\AA$^{-2}$).
+  \item \textbf{Unrestrained equilibration (NPT):} 2~ns.
+  \item \textbf{Production (NPT):} up to 200~ns (optionally preceded by a shorter 5--50~ns trial run).
+\end{itemize}
+All dynamics used a 2~fs timestep with SHAKE on bonds involving hydrogen (\texttt{ntc=2, ntf=2}), Langevin thermostat (\texttt{ntt=3, gamma\_ln=2.0}), and isotropic pressure coupling in NPT runs (\texttt{ntp=1}) with Monte Carlo barostat (\texttt{barostat=2}). Center-of-mass motion was removed periodically (\texttt{nscm=1000}). Trajectories were written in NetCDF format (\texttt{ioutfm=1}).
+
+\subsection{Trajectory imaging and Zn coordination monitoring}
+Trajectories were auto-imaged in \texttt{cpptraj} prior to analysis to keep molecules in a familiar unit cell. To validate preservation of the Zn coordination geometry during MD, Zn--S distances were monitored using a dedicated \texttt{cpptraj} script (\texttt{Analysis/zn\_distances.cpptraj}) that outputs time series for each Zn--SG pair for sites 221, 222, and 223.
+

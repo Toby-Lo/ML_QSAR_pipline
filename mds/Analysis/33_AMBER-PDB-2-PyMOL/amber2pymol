@@ -1,0 +1,60 @@
+#!/usr/bin/perl
+use Getopt::Std;
+BEGIN{
+	print "Convert PDB from AMBER format to PDB v3\n";
+}
+die "Usage: amber2pymol [-O or -R] <filename1> <filename2> .. <filenameN>.
+-O Overwrite the original file with the original filename[!!]
+-R Replace the original file with the new filename[!!]\n" if @ARGV < 1;
+getopts("OR",\%options);
+$outname = "tmp" if exists $options{O};
+
+foreach $inname(@ARGV){
+	open (OUT,$inname)|| die "Open $inname failed!\n";
+	goto PRIORITY if exists $options{R};
+	if (exists $options{O}){
+		print STDERR "Converting $inname...";
+		goto DO;
+	}
+PRIORITY:
+	$inname =~ /(.+)\.pdb\D*(\d+)*$/i;
+	$add = $2 eq "" ? "":"_".$2;
+	$outname = $1.$add."_pymol.pdb";
+	print STDERR "Converting $inname to $outname...";
+DO:
+	open IN,"> $outname";
+	$chainID = 0;
+	$ID = chr(65 + ($chainID)%26);
+	while (<OUT>){
+		chomp;
+		if (/^ATOM/ or /^HETATM/){
+			if (/WAT/){
+				$ID = "W";
+			}
+			if (/Na+/ or /Cl-/){
+				$ID = "Z";
+			}
+			s/ R([AUGC])[35] /  $1  /g;
+			s/ R([AUCG]) /  $1 /g;
+			s/ HI\w / HIS /g;
+			$A = substr($_, 0, 21);
+			$B = substr($_, 22);
+			s/^.+$/$A$ID$B/;
+		}elsif (/^TER/){
+			$chainID ++;
+			$ID = chr(65 + ($chainID)%26);
+		}elsif (/^MODEL/){
+			$chainID = 0;
+			$ID = chr(65 + ($chainID)%26);
+		}
+		$C = $_;
+		print IN $C,"\n";
+	}
+	close OUT;
+	close IN;
+	`rm $inname` if exists $options{R};
+	if (exists $options{O} && !( exists $options{R} )){
+		`mv -f $outname $inname`;
+	}
+	print "Done!\n";
+}

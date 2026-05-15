@@ -1,0 +1,5 @@
+parm complex.parm7
+trajin cMD-Prod.nc
+center mass origin @CA
+image center origin familiar
+trajout cMD-Prod_centered.nc netcdf

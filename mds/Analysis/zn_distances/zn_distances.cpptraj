@@ -1,0 +1,31 @@
+# mkdir -p analysis
+# cpptraj -i ../../Analysis/zn_distances.cpptraj
+
+# python3 ../../Analysis/zn_distances/plot_zn_distances.py
+
+parm complex.parm7
+trajin cMD-Prod.nc
+
+# Zn221 site (single Zn):
+# Zn A221 coordinated by CYM A161/A208/A210/A215 (SG)
+distance ZN221_CYM161_ZN_SG :221@ZN :161@SG out analysis/ZN221_CYM161_ZN_SG.dat
+distance ZN221_CYM208_ZN_SG :221@ZN :208@SG out analysis/ZN221_CYM208_ZN_SG.dat
+distance ZN221_CYM210_ZN_SG :221@ZN :210@SG out analysis/ZN221_CYM210_ZN_SG.dat
+distance ZN221_CYM215_ZN_SG :221@ZN :215@SG out analysis/ZN221_CYM215_ZN_SG.dat
+
+# Zn222/Zn223 cluster (shared CYM43):
+# Zn A222 close to CYM A33/A35/A43/A49 (SG)
+distance ZN222_CYM33_ZN_SG  :222@ZN :33@SG  out analysis/ZN222_CYM33_ZN_SG.dat
+distance ZN222_CYM35_ZN_SG  :222@ZN :35@SG  out analysis/ZN222_CYM35_ZN_SG.dat
+distance ZN222_CYM43_ZN_SG  :222@ZN :43@SG  out analysis/ZN222_CYM43_ZN_SG.dat
+distance ZN222_CYM49_ZN_SG  :222@ZN :49@SG  out analysis/ZN222_CYM49_ZN_SG.dat
+
+# Zn A223 close to CYM A43/A58/A63/A69 (SG)
+distance ZN223_CYM43_ZN_SG  :223@ZN :43@SG  out analysis/ZN223_CYM43_ZN_SG.dat
+distance ZN223_CYM58_ZN_SG  :223@ZN :58@SG  out analysis/ZN223_CYM58_ZN_SG.dat
+distance ZN223_CYM63_ZN_SG  :223@ZN :63@SG  out analysis/ZN223_CYM63_ZN_SG.dat
+distance ZN223_CYM69_ZN_SG  :223@ZN :69@SG  out analysis/ZN223_CYM69_ZN_SG.dat
+
+run
+quit
+

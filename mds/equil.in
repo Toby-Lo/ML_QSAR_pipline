@@ -1,0 +1,14 @@
+Unrestrained NPT Equilibration
+&cntrl
+  imin=0, irest=1, ntx=5,             ! Restart from previous step
+  nstlim=1000000, dt=0.002,           ! 2 ns total simulation time
+  ntc=2, ntf=2,                       ! SHAKE on bonds involving hydrogen
+  cut=10.0,                           ! Non-bonded cutoff (Å)
+  ntb=2, ntp=1, barostat=2, taup=2.0, ! NPT ensemble with isotropic pressure scaling
+  pres0=1.0,                          ! Reference pressure (atm)
+  ntt=3, gamma_ln=2.0, temp0=300.0,   ! Langevin thermostat at 300 K
+  ioutfm=1, ntxo=2,                   ! NetCDF traj + restart
+  ntpr=5000, ntwx=5000, ntwr=5000,    ! Output frequencies
+  nscm=1000,                          ! Remove COM translation
+  ntr=0                               ! No positional restraints
+/

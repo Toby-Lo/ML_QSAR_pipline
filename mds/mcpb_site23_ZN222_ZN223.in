@@ -1,0 +1,7 @@
+original_pdb ../protein_clean_ZnCYM.pdb
+group_name ZN222_ZN223_cluster
+ion_ids 3418 3419
+cut_off 2.8
+force_field ff19SB
+water_model OPC
+
