@@ -76,7 +76,8 @@ PLOT_CONFIG: Dict[str, Any] = {
     "line_width": 1.8,
     "grid_alpha": 0.15,
     "grid_color": "#d9d9d9",
-    "tick_color": "#4c4c4c",
+    "tick_color": "black",
+    "text_color": "black",
     "hist_color": "#003366",
     "hist_edgecolor": "black",
     "hist_edgewidth": 0.3,
@@ -180,6 +181,12 @@ def _configure_rcparams() -> None:
             "axes.labelweight": PLOT_CONFIG["label_fontweight"],
             "axes.linewidth": PLOT_CONFIG["line_width"],
             "axes.edgecolor": "#333333",
+            "text.color": PLOT_CONFIG["text_color"],
+            "axes.labelcolor": PLOT_CONFIG["text_color"],
+            "axes.titlecolor": PLOT_CONFIG["text_color"],
+            "xtick.color": PLOT_CONFIG["text_color"],
+            "ytick.color": PLOT_CONFIG["text_color"],
+            "legend.labelcolor": PLOT_CONFIG["text_color"],
             "axes.grid": True,
             "grid.alpha": PLOT_CONFIG["grid_alpha"],
             "grid.color": PLOT_CONFIG["grid_color"],
@@ -205,6 +212,9 @@ def _style_axis(ax: plt.Axes) -> None:
         spine.set_linewidth(1.3)
         spine.set_visible(True)
     ax.tick_params(colors=PLOT_CONFIG["tick_color"], which="both")
+    ax.xaxis.label.set_color(PLOT_CONFIG["text_color"])
+    ax.yaxis.label.set_color(PLOT_CONFIG["text_color"])
+    ax.title.set_color(PLOT_CONFIG["text_color"])
 
 
 def _save_plot(fig: plt.Figure, base_path: Path) -> None:
@@ -953,6 +963,7 @@ if _IN_IPYTHON:
         "dpi": 600,
         "grid_alpha": 0.2,
         "axes_linewidth": 1.2,
+        "text_color": "black",
     }
 
     plt.rcParams.update(
@@ -963,6 +974,12 @@ if _IN_IPYTHON:
             "figure.dpi": PLOT_STYLE["dpi"],
             "savefig.dpi": PLOT_STYLE["dpi"],
             "axes.linewidth": PLOT_STYLE["axes_linewidth"],
+            "text.color": PLOT_STYLE["text_color"],
+            "axes.labelcolor": PLOT_STYLE["text_color"],
+            "axes.titlecolor": PLOT_STYLE["text_color"],
+            "xtick.color": PLOT_STYLE["text_color"],
+            "ytick.color": PLOT_STYLE["text_color"],
+            "legend.labelcolor": PLOT_STYLE["text_color"],
             "axes.spines.top": False,
             "axes.spines.right": False,
             "axes.grid": True,

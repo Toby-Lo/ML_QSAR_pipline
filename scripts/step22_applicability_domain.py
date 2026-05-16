@@ -2003,8 +2003,38 @@ def generate_publication_plots(ad_out_dir: Path) -> List[str]:
 
     fig, axes = plt.subplots(2, 2, figsize=(9.6, 7.6), constrained_layout=True)
     panel_labels = ["(A)", "(B)", "(C)", "(D)"]
-    for panel, lab in zip(axes.flat, panel_labels):
-        panel.text(0.02, 0.98, lab, transform=panel.transAxes, ha="left", va="top", fontsize=11, fontweight="bold")
+    panel_subtitles = [
+        "t-SNE Projection of AD Space",
+        "Distribution of AD Scores",
+        "AD Calibration Curve" if (cal_df is not None and {"ad_mean", "error_mean", "error_std"}.issubset(cal_df.columns))
+        else "Calibrated Probability vs AD Score",
+        "Williams Plot",
+    ]
+    for panel, lab, sub in zip(axes.flat, panel_labels, panel_subtitles):
+        panel.text(
+            0.01,
+            1.04,
+            lab,
+            transform=panel.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=11,
+            fontweight="bold",
+            clip_on=False,
+            color="black",
+        )
+        panel.text(
+            0.50,
+            1.04,
+            sub,
+            transform=panel.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=11,
+            fontweight="bold",
+            clip_on=False,
+            color="black",
+        )
 
     ax = axes[0, 0]
     if tr_emb is not None and te_emb is not None:

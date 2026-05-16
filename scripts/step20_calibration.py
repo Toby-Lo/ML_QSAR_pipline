@@ -242,13 +242,52 @@ def reliability_plot(y_true: np.ndarray,
     plt.ylabel("Fraction of positives")
     plt.title(title)
     plt.legend(frameon=False)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.savefig(out_png_path, dpi=300)
     if out_png_path_extra is not None:
         plt.savefig(out_png_path_extra, dpi=300)
     if out_svg_path is not None:
         plt.savefig(out_svg_path)
     plt.close()
+
+
+def set_panel_header(ax: plt.Axes, panel_label: str, subtitle: str) -> None:
+    ax.set_title("")
+    ax.text(
+        0.01,
+        1.04,
+        panel_label,
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=12,
+        fontweight="bold",
+        clip_on=False,
+    )
+    ax.text(
+        0.50,
+        1.04,
+        subtitle,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        fontweight="bold",
+        clip_on=False,
+    )
+
+
+def hide_y_zero_tick_label(ax: plt.Axes) -> None:
+    """Hide y=0 tick label to avoid duplicated 0.0 at the origin."""
+    ticks = ax.get_yticks()
+    labels: List[str] = []
+    for t in ticks:
+        if np.isclose(t, 0.0):
+            labels.append("")
+        else:
+            labels.append(f"{t:.1f}")
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(labels)
 
 
 def calibrate_one_model(model,
@@ -315,21 +354,23 @@ def plot_calibration_composite(run_dir: Path, split_seed: int, model_key: str, d
     ax_a.plot(curve_sig["mean_pred_raw"], curve_sig["frac_pos_raw"], "o-", color=color_raw, linewidth=1.3, markersize=4, label="Raw")
     ax_a.plot(curve_sig["mean_pred_cal"], curve_sig["frac_pos_cal"], "o-", color=color_platt, linewidth=1.8, markersize=4.5, label="Platt")
     ax_a.plot(curve_iso["mean_pred_cal"], curve_iso["frac_pos_cal"], "o-", color=color_iso, linewidth=1.8, markersize=4.5, label="Isotonic")
-    ax_a.set_title("(A) Reliability diagram")
+    set_panel_header(ax_a, "(A)", "Reliability diagram")
     ax_a.set_xlabel("Mean predicted probability")
     ax_a.set_ylabel("Fraction of positives")
     ax_a.set_xlim(0, 1)
     ax_a.set_ylim(0, 1.02)
+    hide_y_zero_tick_label(ax_a)
     ax_a.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="lower right")
 
     bins = np.linspace(0.0, 1.0, 21)
     ax_b.hist(raw_prob, bins=bins, density=True, alpha=0.35, color=color_raw, edgecolor="black", linewidth=0.55, label="Raw")
     ax_b.hist(platt_prob, bins=bins, density=True, alpha=0.35, color=color_platt, edgecolor="black", linewidth=0.55, label="Platt")
     ax_b.hist(iso_prob, bins=bins, density=True, alpha=0.35, color=color_iso, edgecolor="black", linewidth=0.55, label="Isotonic")
-    ax_b.set_title("(B) Probability histogram")
+    set_panel_header(ax_b, "(B)", "Probability histogram")
     ax_b.set_xlabel("Predicted probability")
     ax_b.set_ylabel("Density")
     ax_b.set_xlim(0, 1)
+    hide_y_zero_tick_label(ax_b)
     ax_b.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="upper center", ncol=3)
 
     brier_vals = [float(met_sig.get("brier_raw", np.nan)), float(met_sig.get("brier_calibrated", np.nan)), float(met_iso.get("brier_calibrated", np.nan))]
@@ -339,7 +380,7 @@ def plot_calibration_composite(run_dir: Path, split_seed: int, model_key: str, d
     ax_c.set_ylim(0.0, y_top)
     for bar, value in zip(bars, brier_vals):
         ax_c.text(bar.get_x() + bar.get_width() / 2.0, float(value) + y_pad * 0.35, f"{value:.3f}", ha="center", va="bottom")
-    ax_c.set_title("(C) Brier score comparison")
+    set_panel_header(ax_c, "(C)", "Brier score comparison")
     ax_c.set_ylabel("Brier score (lower is better)")
 
     err_df = pd.DataFrame({"Raw": np.abs(raw_prob - y_true), "Platt": np.abs(platt_prob - y_true), "Isotonic": np.abs(iso_prob - y_true)})
@@ -353,7 +394,7 @@ def plot_calibration_composite(run_dir: Path, split_seed: int, model_key: str, d
         parts["cmedians"].set_linewidth(1.1)
     ax_d.set_xticks([1, 2, 3])
     ax_d.set_xticklabels(["Raw", "Platt", "Isotonic"])
-    ax_d.set_title("(D) Calibration error distribution")
+    set_panel_header(ax_d, "(D)", "Calibration error distribution")
     ax_d.set_ylabel(r"$|p - y|$")
     ax_d.set_ylim(0, 1)
 
@@ -370,7 +411,7 @@ def plot_calibration_composite(run_dir: Path, split_seed: int, model_key: str, d
         fontweight="bold",
 )
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
     out_dir = run_dir / f"split_seed_{split_seed}" / "calibration" / model_key / "composite_plots"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_png = out_dir / "calibration_composite_2x2.png"
@@ -750,11 +791,12 @@ if _IN_IPYTHON:
     ax_a.plot(curve_sig["mean_pred_raw"], curve_sig["frac_pos_raw"], "o-", color=color_raw, linewidth=1.3, markersize=4, label="Raw")
     ax_a.plot(curve_sig["mean_pred_cal"], curve_sig["frac_pos_cal"], "o-", color=color_platt, linewidth=1.8, markersize=4.5, label="Platt")
     ax_a.plot(curve_iso["mean_pred_cal"], curve_iso["frac_pos_cal"], "o-", color=color_iso, linewidth=1.8, markersize=4.5, label="Isotonic")
-    ax_a.set_title("(A) Reliability diagram")
+    set_panel_header(ax_a, "(A)", "Reliability diagram")
     ax_a.set_xlabel("Mean predicted probability")
     ax_a.set_ylabel("Fraction of positives")
     ax_a.set_xlim(0, 1)
     ax_a.set_ylim(0, 1.02)
+    hide_y_zero_tick_label(ax_a)
     ax_a.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="lower right")
 
     # (B) Probability histogram
@@ -762,10 +804,11 @@ if _IN_IPYTHON:
     ax_b.hist(raw_prob, bins=bins, density=True, alpha=0.35, color=color_raw, edgecolor="black", linewidth=0.55, label="Raw")
     ax_b.hist(platt_prob, bins=bins, density=True, alpha=0.35, color=color_platt, edgecolor="black", linewidth=0.55, label="Platt")
     ax_b.hist(iso_prob, bins=bins, density=True, alpha=0.35, color=color_iso, edgecolor="black", linewidth=0.55, label="Isotonic")
-    ax_b.set_title("(B) Probability histogram")
+    set_panel_header(ax_b, "(B)", "Probability histogram")
     ax_b.set_xlabel("Predicted probability")
     ax_b.set_ylabel("Density")
     ax_b.set_xlim(0, 1)
+    hide_y_zero_tick_label(ax_b)
     ax_b.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0, loc="upper center", ncol=3)
 
     # (C) Brier score comparison
@@ -783,7 +826,7 @@ if _IN_IPYTHON:
             ha="center",
             va="bottom",
         )
-    ax_c.set_title("(C) Brier score comparison")
+    set_panel_header(ax_c, "(C)", "Brier score comparison")
     ax_c.set_ylabel("Brier score (lower is better)")
 
     # (D) Calibration error distribution
@@ -804,7 +847,7 @@ if _IN_IPYTHON:
         parts["cmedians"].set_linewidth(1.1)
     ax_d.set_xticks([1, 2, 3])
     ax_d.set_xticklabels(["Raw", "Platt", "Isotonic"])
-    ax_d.set_title("(D) Calibration error distribution")
+    set_panel_header(ax_d, "(D)", "Calibration error distribution")
     ax_d.set_ylabel(r"$|p - y|$")
     ax_d.set_ylim(0, 1)
 

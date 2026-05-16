@@ -10,7 +10,8 @@ python scripts/step40_plot_performance.py \
   --include-external \
   --include-cv \
   --boxplot-stage both \
-  --output-dir models_out/qsar_ml_20260412_162829/figures/performance/ 
+  --output-dir models_out/qsar_ml_20260412_162829/figures/performance/ \
+  --polar-show-values 
 
   
 optional arguments:
@@ -545,29 +546,32 @@ def plot_polar_metric_bars(
     dpi: int,
     font: str,
     global_color_map: Dict[str, tuple],
-    show_values: bool = False,
+    show_values: bool = True,
 ) -> None:
     if metric_df.empty:
         return
     configure_plotting(font)
+
     models = sorted(metric_df["model"].dropna().unique())
     if not models:
         print(f"[WARN] No models available for polar plot at stage '{stage}'.")
         return
 
     get_or_assign_model_colors(models, palette_name, global_color_map)
-    fig, ax = plt.subplots(1, 1, figsize=(11, 11), subplot_kw={"projection": "polar"})
+    fig, ax = plt.subplots(1, 1, figsize=(12, 12), subplot_kw={"projection": "polar"})
+
     n_metrics = len(POLAR_METRIC_ORDER)
     n_models = len(models)
+
     sector_width = 2 * np.pi / n_metrics
     total_bars = n_metrics * n_models
-    group_gap_units = 1.2
+    group_gap_units = 1.5
     unit_angle = 2 * np.pi / (total_bars + n_metrics * group_gap_units)
     bar_slot = unit_angle
     group_gap = group_gap_units * unit_angle
     bar_width = bar_slot * 0.92
-    inner_radius = 0.22
-    radial_scale = 0.72
+    inner_radius = 0.25
+    radial_scale = 0.62
 
     theta_centers: List[float] = []
     group_centers: List[float] = []
@@ -600,22 +604,26 @@ def plot_polar_metric_bars(
             theta = theta_centers[bar_idx]
             bar_idx += 1
 
+            #height = np.clip(mean_val, 0.0, 1.0) * radial_scale
             height = np.clip(mean_val, 0.0, 1.0) * radial_scale
             y_top = inner_radius + height
+            color = global_color_map.get(model, (0.5, 0.5, 0.5))
+
             ci_low = max(0.0, mean_val - ci_val)
             ci_high = min(1.0, mean_val + ci_val)
             err_low = (mean_val - ci_low) * radial_scale
             err_high = (ci_high - mean_val) * radial_scale
             color = global_color_map.get(model, sns.color_palette(palette_name)[0])
+
             ax.bar(
                 theta,
                 height,
                 bottom=inner_radius,
                 width=bar_width,
                 color=color,
-                alpha=0.92,
+                alpha=0.90,
                 edgecolor="white",
-                linewidth=0.6,
+                linewidth=0.5,
                 zorder=3,
             )
             ax.errorbar(
@@ -630,15 +638,24 @@ def plot_polar_metric_bars(
                 zorder=4,
             )
             if show_values:
+                # Place value text inside bar; MCC at 0.4 ring, others at 0.6 ring.
+                target_ring = 0.4 if metric == "mcc" else 0.6
+                target_r = inner_radius + target_ring * radial_scale
+                label_r = min(target_r, y_top - 0.02)
+                label_r = max(label_r, inner_radius + 0.02)
+                text_rotation = np.degrees(theta) - 90.0
+                if metric in {"precision", "recall"}:
+                    text_rotation += 180.0
                 ax.text(
                     theta,
-                    min(y_top + 0.028, 1.03),
+                    label_r,
                     f"{mean_val:.2f}",
                     ha="center",
                     va="center",
-                    fontsize=8.5,
-                    color="#333333",
-                    rotation=np.degrees(theta) - 90.0,
+                    fontsize=9,
+                    fontweight="bold",
+                    color="black",
+                    rotation=text_rotation,
                     rotation_mode="anchor",
                     zorder=5,
                 )
@@ -646,7 +663,30 @@ def plot_polar_metric_bars(
     ax.set_theta_offset(np.pi / 2.0)  # MCC sector around 12 o'clock
     ax.set_theta_direction(-1)
     ax.set_xticks([])
-    ax.set_ylim(0.0, 1.05)
+    ax.set_ylim(0.0, 1.1)
+    ax.set_axis_off() # 移除默认轴
+
+    # 添加自定义背景圈
+    radial_label_theta = np.deg2rad(36.0)  # 36° clockwise from top (with theta_direction=-1)
+    for r in [0.2, 0.4, 0.6, 0.8, 1.0]:
+        r_pos = inner_radius + r * radial_scale
+        ax.plot(np.linspace(0, 2*np.pi, 100), [r_pos]*100, color="gray", alpha=0.2, ls="--", lw=0.8)
+        ax.text(
+            radial_label_theta,
+            r_pos - 0.015,
+            f"{r}",
+            color="black",
+            fontsize=8,
+            ha="center",
+            va="center",
+        )
+
+    # 绘制指标标签 (在中心区域)
+    for metric, theta in zip(POLAR_METRIC_ORDER, group_centers):
+        label_text = METRIC_LABELS.get(metric, metric.upper())
+        ax.text(theta, inner_radius - 0.07, label_text, ha="center", va="center",
+                fontsize=13, fontweight="bold")
+        
     tick_values = [0.2, 0.4, 0.6, 0.8, 1.0]
     tick_positions = [inner_radius + v * radial_scale for v in tick_values]
     ax.set_yticks(tick_positions)
@@ -660,19 +700,14 @@ def plot_polar_metric_bars(
     ax.set_facecolor("white")
     ax.spines["polar"].set_visible(False)
 
-    # Inner ring and segmented arcs with metric labels next to each arc.
-    inner_circle = Circle((0.5, 0.5), 0.150, transform=ax.transAxes, facecolor="white", edgecolor="black", linewidth=1.0, zorder=10)
+    # Inner ring with metric labels.
+    inner_circle = Circle((0.5, 0.5), 0.120, transform=ax.transAxes, facecolor="white", edgecolor="black", linewidth=1.0, zorder=10)
     ax.add_artist(inner_circle)
     for metric, theta in zip(POLAR_METRIC_ORDER, group_centers):
-        arc_span = sector_width * 0.78
-        gap = sector_width * 0.12
-        theta_arc = np.linspace(theta - arc_span / 2.0 + gap, theta + arc_span / 2.0 - gap, 120)
-        r_arc = np.full_like(theta_arc, inner_radius * 1.35)
-        ax.plot(theta_arc, r_arc, color="black", linewidth=1.3, zorder=11)
         label_text = METRIC_LABELS.get(metric, metric.upper())
         ax.text(
             theta,
-            inner_radius * 0.95,
+            inner_radius * 0.5,
             label_text,
             ha="center",
             va="center",
