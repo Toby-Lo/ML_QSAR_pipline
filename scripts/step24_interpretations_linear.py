@@ -39,8 +39,11 @@ python scripts/step24_interpretations_linear.py \
   --run-dir models_out/qsar_ml_20260412_162829 \
   --split-seed 12345 \
   --plot-only \
-  --plot-model SVC
+  --plot-model SVC \
+  --draw-motifs \
+  --annotate-fp
 
+--local-id <Molecular ID>
 """
 
 # %%
@@ -564,6 +567,124 @@ def compute_and_export(config: ShapConfig) -> Dict[str, Any]:
 
 
 # %%
+def draw_demasked_motifs(csv_path: Path, output_dir: Path) -> None:
+    from rdkit.Chem.Draw import rdMolDraw2D
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    df = pd.read_csv(csv_path)
+    
+    # Dictionary of common functional groups and rings for automated annotation
+    fg_dict = {
+        "Benzene": Chem.MolFromSmarts("c1ccccc1"),
+        "Pyrimidine": Chem.MolFromSmarts("c1cncnc1"),
+        "Pyridine": Chem.MolFromSmarts("c1ccncc1"),
+        "Thiazole": Chem.MolFromSmarts("c1cscn1"),
+        "Oxazole": Chem.MolFromSmarts("c1cocn1"),
+        "Imidazole": Chem.MolFromSmarts("c1c[nH]cn1"),
+        "Pyrrole": Chem.MolFromSmarts("c1cc[nH]c1"),
+        "Thiophene": Chem.MolFromSmarts("c1ccsc1"),
+        "Furan": Chem.MolFromSmarts("c1ccoc1"),
+        "Indole": Chem.MolFromSmarts("c1ccc2[nH]ccc2c1"),
+        "Quinoline": Chem.MolFromSmarts("c1cccc2nccc12"),
+        "Isoquinoline": Chem.MolFromSmarts("c1cccc2cncc12"),
+        "Carboxyl": Chem.MolFromSmarts("C(=O)[OH]"),
+        "Ester": Chem.MolFromSmarts("C(=O)O[C,c]"),
+        "Amide": Chem.MolFromSmarts("C(=O)N"),
+        "Sulfonamide": Chem.MolFromSmarts("S(=O)(=O)N"),
+        "Alkyl chain (C4+)": Chem.MolFromSmarts("[CX4]-[CX4]-[CX4]-[CX4]"),
+        "Piperazine": Chem.MolFromSmarts("C1CNCCN1"),
+        "Morpholine": Chem.MolFromSmarts("C1COCCN1"),
+        "Piperidine": Chem.MolFromSmarts("C1CCCCN1"),
+        "Cyclohexane": Chem.MolFromSmarts("C1CCCCC1"),
+        "Cyclopentane": Chem.MolFromSmarts("C1CCCC1"),
+        "Tetrahydrofuran": Chem.MolFromSmarts("C1CCOC1"),
+        "Triazole": Chem.MolFromSmarts("c1n[nH]cn1"),
+        "Tetrazole": Chem.MolFromSmarts("c1nn[nH]n1"),
+    }
+    
+    motif_annotations = []
+    
+    for _, row in df.iterrows():
+        smiles = str(row.get("representative_active_smiles", ""))
+        smarts = str(row.get("top_motif_smarts", ""))
+        bit_id = row.get("bit_id", "unknown")
+        shap_val = row.get("mean_abs_shap_global", 0.0)
+        
+        if not smiles or not smarts or pd.isna(smiles) or pd.isna(smarts) or smiles.lower() == "nan" or smarts.lower() == "nan":
+            continue
+            
+        mol = Chem.MolFromSmiles(smiles)
+        patt = Chem.MolFromSmarts(smarts)
+        if mol is None or patt is None:
+            continue
+            
+        matches = mol.GetSubstructMatch(patt)
+        if not matches:
+            continue
+            
+        annotations = []
+        match_set = set(matches)
+        for name, fg_patt in fg_dict.items():
+            if fg_patt is None: continue
+            fg_matches = mol.GetSubstructMatches(fg_patt)
+            for m in fg_matches:
+                overlap = len(set(m).intersection(match_set))
+                if overlap >= max(1, min(len(m), len(match_set)) * 0.5):
+                    annotations.append(name)
+                    break
+                    
+        motif_annotations.append({
+            "bit_id": bit_id,
+            "smarts": smarts,
+            "annotations": ", ".join(set(annotations)) if annotations else ""
+        })
+        
+        drawer = rdMolDraw2D.MolDraw2DSVG(600, 600)
+        options = drawer.drawOptions()
+        options.backgroundColour = (1, 1, 1, 1)
+        options.legendFontSize = 24
+        options.annotationFontScale = 0.8
+        options.bondLineWidth = 1.5
+        options.fixedFontSize = 14
+        
+        hit_bonds = []
+        for bond in patt.GetBonds():
+            try:
+                aid1 = matches[bond.GetBeginAtomIdx()]
+                aid2 = matches[bond.GetEndAtomIdx()]
+                bond_obj = mol.GetBondBetweenAtoms(aid1, aid2)
+                if bond_obj is not None:
+                    hit_bonds.append(bond_obj.GetIdx())
+            except Exception:
+                pass
+                
+        highlight_color = (0.7, 0.85, 1.0, 0.6)
+        mol_prep = rdMolDraw2D.PrepareMolForDrawing(mol)
+        
+        legend_txt = f"Bit {bit_id} | SHAP: {shap_val:.3f}"
+        if annotations:
+            legend_txt += f" | {', '.join(set(annotations))}"
+            
+        drawer.DrawMolecule(
+            mol_prep,
+            legend=legend_txt,
+            highlightAtoms=matches,
+            highlightAtomColors={i: highlight_color for i in matches},
+            highlightBonds=hit_bonds,
+            highlightBondColors={i: highlight_color for i in hit_bonds}
+        )
+        drawer.FinishDrawing()
+        
+        safe_bit = str(bit_id).replace("/", "_").replace("\\", "_")
+        out_file = output_dir / f"bit_{safe_bit}_motif.svg"
+        with open(out_file, "w") as f:
+            f.write(drawer.GetDrawingText())
+            
+    if motif_annotations:
+        annot_df = pd.DataFrame(motif_annotations)
+        annot_df.to_csv(output_dir / "motif_annotations.csv", index=False)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="LR/SVC SHAP interpretation from step10 SHAP-ready bundles")
     p.add_argument("--run-dir", type=Path, required=True, help="Run directory (models_out/qsar_ml_YYYYMMDD_HHMMSS)")
@@ -581,7 +702,76 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--plot-only", action="store_true", help="Plot only from existing SHAP exports")
     p.add_argument("--plot-model", help="Model key for plot-only mode (default: first from --models)")
     p.add_argument("--local-id", help="Optional sample id for local explanation in plot-only mode")
+    p.add_argument("--draw-motifs", action="store_true", help="Draw 2D structures (SVG) for demasked motifs from fp_motif_demasked.csv")
+    p.add_argument("--annotate-fp", action="store_true", help="Append matched chemical motif names to fp features in plots")
     return p.parse_args()
+
+
+def _get_motif_annotations(fp_demasked_path: Path) -> dict:
+    if not fp_demasked_path.exists():
+        return {}
+    df = pd.read_csv(fp_demasked_path)
+    
+    fg_dict = {
+        "Benzene": Chem.MolFromSmarts("c1ccccc1"),
+        "Pyrimidine": Chem.MolFromSmarts("c1cncnc1"),
+        "Pyridine": Chem.MolFromSmarts("c1ccncc1"),
+        "Thiazole": Chem.MolFromSmarts("c1cscn1"),
+        "Oxazole": Chem.MolFromSmarts("c1cocn1"),
+        "Imidazole": Chem.MolFromSmarts("c1c[nH]cn1"),
+        "Pyrrole": Chem.MolFromSmarts("c1cc[nH]c1"),
+        "Thiophene": Chem.MolFromSmarts("c1ccsc1"),
+        "Furan": Chem.MolFromSmarts("c1ccoc1"),
+        "Indole": Chem.MolFromSmarts("c1ccc2[nH]ccc2c1"),
+        "Quinoline": Chem.MolFromSmarts("c1cccc2nccc12"),
+        "Isoquinoline": Chem.MolFromSmarts("c1cccc2cncc12"),
+        "Carboxyl": Chem.MolFromSmarts("C(=O)[OH]"),
+        "Ester": Chem.MolFromSmarts("C(=O)O[C,c]"),
+        "Amide": Chem.MolFromSmarts("C(=O)N"),
+        "Sulfonamide": Chem.MolFromSmarts("S(=O)(=O)N"),
+        "Alkyl chain (C4+)": Chem.MolFromSmarts("[CX4]-[CX4]-[CX4]-[CX4]"),
+        "Piperazine": Chem.MolFromSmarts("C1CNCCN1"),
+        "Morpholine": Chem.MolFromSmarts("C1COCCN1"),
+        "Piperidine": Chem.MolFromSmarts("C1CCCCN1"),
+        "Cyclohexane": Chem.MolFromSmarts("C1CCCCC1"),
+        "Cyclopentane": Chem.MolFromSmarts("C1CCCC1"),
+        "Tetrahydrofuran": Chem.MolFromSmarts("C1CCOC1"),
+        "Triazole": Chem.MolFromSmarts("c1n[nH]cn1"),
+        "Tetrazole": Chem.MolFromSmarts("c1nn[nH]n1"),
+    }
+    
+    annotations = {}
+    for _, row in df.iterrows():
+        fname = str(row.get("feature", f"fp_{row.get('bit_id', '')}"))
+        if not fname or fname == "fp_":
+            continue
+        smiles = str(row.get("representative_active_smiles", ""))
+        smarts = str(row.get("top_motif_smarts", ""))
+        if not smiles or not smarts or pd.isna(smiles) or pd.isna(smarts) or smiles.lower() == "nan" or smarts.lower() == "nan":
+            continue
+            
+        mol = Chem.MolFromSmiles(smiles)
+        patt = Chem.MolFromSmarts(smarts)
+        if mol is None or patt is None:
+            continue
+            
+        matches = mol.GetSubstructMatch(patt)
+        if not matches:
+            continue
+            
+        match_set = set(matches)
+        found_names = []
+        for name, fg_patt in fg_dict.items():
+            if fg_patt is None: continue
+            fg_matches = mol.GetSubstructMatches(fg_patt)
+            for m in fg_matches:
+                overlap = len(set(m).intersection(match_set))
+                if overlap >= max(1, min(len(m), len(match_set)) * 0.5):
+                    found_names.append(name)
+                    break
+        if found_names:
+            annotations[fname] = ", ".join(sorted(set(found_names)))
+    return annotations
 
 
 def plot_only_from_exports(
@@ -592,6 +782,7 @@ def plot_only_from_exports(
     output_dir: Optional[Path] = None,
     local_id: Optional[str] = None,
     dpi: int = 600,
+    annotate_fp: bool = False,
 ) -> None:
     import matplotlib as mpl
     mpl.use("Agg", force=True)
@@ -629,8 +820,28 @@ def plot_only_from_exports(
         ids = [str(x) for x in np.atleast_1d(data["id"]).tolist()]
         base_value = float(np.asarray(data["base_value"], dtype=np.float64).reshape(-1)[0])
         feature_display = [str(x) for x in np.atleast_1d(data["feature_display"]).tolist()]
+        smiles = [str(x) for x in np.atleast_1d(data["smiles"]).tolist()] if "smiles" in data.files else []
+        feature_names_raw = [str(x) for x in np.atleast_1d(data["feature_names"]).tolist()] if "feature_names" in data.files else feature_display
+        
+    if annotate_fp:
+        annotations = _get_motif_annotations(fp_demasked_path)
+        for i, name in enumerate(feature_names_raw):
+            if name in annotations:
+                feature_display[i] = f"{feature_display[i]} ({annotations[name]})"
+    else:
+        annotations = {}
+            
     X_df = pd.DataFrame(X, columns=feature_display)
     imp_df = pd.read_csv(imp_path)
+    
+    def update_imp_display(row):
+        fname = str(row["feature"])
+        fdisp = str(row["feature_display"])
+        if fname in annotations:
+            return f"{fdisp} ({annotations[fname]})"
+        return fdisp
+    
+    imp_df["feature_display"] = imp_df.apply(update_imp_display, axis=1)
 
     def _save(fig, name: str) -> None:
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -638,10 +849,17 @@ def plot_only_from_exports(
         fig.savefig(model_dir / f"{name}.svg", bbox_inches="tight")
         plt.close(fig)
 
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap_slate_gold = LinearSegmentedColormap.from_list("slate_gold", ["#4F7396", "#D4AF37"])
+
     fig = plt.figure(figsize=(7.2, 5.2))
-    shap.summary_plot(shap_values, X_df, feature_names=feature_display, max_display=20, show=False, cmap="viridis")
-    plt.xlabel("SHAP value (impact on model output)")
+    shap.summary_plot(shap_values, X_df, feature_names=feature_display, max_display=20, show=False, cmap=cmap_slate_gold)
+    plt.xlabel("SHAP value")
     plt.title(f"{model_key} | SHAP Summary", fontsize=11, pad=10)
+    for spine in plt.gca().spines.values():
+        spine.set_visible(True)
+        spine.set_color("black")
+        spine.set_linewidth(1.0)
     plt.tight_layout()
     _save(fig, "A_global_shap_summary_beeswarm")
 
@@ -650,7 +868,7 @@ def plot_only_from_exports(
     if not desc_df.empty:
         fig, ax = plt.subplots(figsize=(6.8, 5.6))
         y = np.arange(len(desc_df))
-        ax.barh(y, desc_df["mean_abs_shap"].to_numpy(), color="#4C72B0", edgecolor="black", linewidth=0.6)
+        ax.barh(y, desc_df["mean_abs_shap"].to_numpy(), color="#4F7396", edgecolor="black", linewidth=0.6)
         ax.set_yticks(y)
         ax.set_yticklabels(desc_df["feature_display"].astype(str).tolist())
         ax.invert_yaxis()
@@ -658,40 +876,43 @@ def plot_only_from_exports(
         ax.set_title(f"{model_key} | Descriptor Importance Ranking")
         _save(fig, "B_descriptor_importance_ranking")
 
-    # Combined B+C stacked-right chart (top: descriptor, bottom: fingerprint; both positive)
+    # Combined B+C stacked-right chart (sorted by absolute mean SHAP, interleaved)
     if not desc_df.empty and not fp_df_all.empty:
+        from matplotlib.patches import Patch
         n_each = int(min(12, len(desc_df), len(fp_df_all)))
-        desc_top = desc_df.head(n_each).reset_index(drop=True)
-        fp_top = fp_df_all.head(n_each).reset_index(drop=True)
+        desc_top = desc_df.head(n_each)
+        fp_top = fp_df_all.head(n_each)
+        
+        combined_df = pd.concat([desc_top, fp_top]).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
         fig, ax = plt.subplots(figsize=(9.4, 8.6))
 
-        gap = 0
-        y_desc = np.arange(n_each)
-        y_fp = np.arange(n_each) + n_each + gap
-        desc_vals = desc_top["mean_abs_shap"].to_numpy(dtype=float)
-        fp_vals = fp_top["mean_abs_shap"].to_numpy(dtype=float)
+        y_pos = np.arange(len(combined_df))
+        vals = combined_df["mean_abs_shap"].to_numpy(dtype=float)
+        colors = ["#4F7396" if str(t).lower() == "descriptor" else "#769A77" for t in combined_df["feature_type"]]
 
-        ax.barh(y_desc, desc_vals, color="#4C72B0", edgecolor="black", linewidth=0.6, label="Descriptor")
-        ax.barh(y_fp, fp_vals, color="#55A868", edgecolor="black", linewidth=0.6, label="Fingerprint")
+        ax.barh(y_pos, vals, color=colors, edgecolor="black", linewidth=0.6)
 
-        ax.set_yticks(np.concatenate([y_desc, y_fp]))
-        ax.set_yticklabels(
-            desc_top["feature_display"].astype(str).tolist() + fp_top["feature_display"].astype(str).tolist()
-        )
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(combined_df["feature_display"].astype(str).tolist())
         ax.invert_yaxis()
         ax.margins(y=0.01)
-        ax.set_ylim(y_fp[-1] + 0.45, -0.45)
-        max_abs = float(max(np.max(desc_vals), np.max(fp_vals)))
-        min_pos = float(min(np.min(desc_vals), np.min(fp_vals)))
+        ax.set_ylim(y_pos[-1] + 0.45, -0.45)
+        
+        max_abs = float(np.max(vals))
+        min_pos = float(np.min(vals))
         # Dynamic axis compression: keep a small, data-adaptive headroom only.
         right_pad = max(0.0015, 0.06 * max_abs)
         left_pad = max(0.0, min_pos - max(0.001, 0.02 * max_abs))
         ax.set_xlim(left_pad, max_abs + right_pad)
+        
         ax.set_xlabel("Mean |SHAP value|")
         ax.set_title(f"{model_key} | Descriptor and Fingerprint Importance Ranking")
-        #ax.text(0.02, 0.98, "(B) Descriptor", transform=ax.transAxes, ha="left", va="top", fontsize=10)
-        #ax.text(0.02, 0.48, "(C) Fingerprint", transform=ax.transAxes, ha="left", va="top", fontsize=10)
-        ax.legend(loc="lower right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
+        
+        legend_elements = [
+            Patch(facecolor="#4F7396", edgecolor="black", label="Descriptor"),
+            Patch(facecolor="#769A77", edgecolor="black", label="Fingerprint")
+        ]
+        ax.legend(handles=legend_elements, loc="lower right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
         ax.grid(False)
         for spine in ax.spines.values():
             spine.set_visible(True)
@@ -705,9 +926,14 @@ def plot_only_from_exports(
         if not fp_df.empty:
             fig, ax = plt.subplots(figsize=(8.8, 6.2))
             y = np.arange(len(fp_df))
-            ax.barh(y, fp_df["mean_abs_shap_global"].to_numpy(), color="#55A868", edgecolor="black", linewidth=0.6)
+            ax.barh(y, fp_df["mean_abs_shap_global"].to_numpy(), color="#769A77", edgecolor="black", linewidth=0.6)
+            labels = []
+            for _, row in fp_df.iterrows():
+                fname = f"fp_{int(row['bit_id'])}"
+                annot = f" ({annotations[fname]})" if fname in annotations else ""
+                labels.append(f"bit {int(row['bit_id'])}{annot} | f={float(row['occurrence_fraction']):.2f}")
             ax.set_yticks(y)
-            ax.set_yticklabels([f"bit {int(b)} | f={float(fr):.2f}" for b, fr in zip(fp_df["bit_id"], fp_df["occurrence_fraction"])])
+            ax.set_yticklabels(labels)
             ax.invert_yaxis()
             ax.set_xlabel("Mean |SHAP value|")
             ax.set_title(f"{model_key} | De-masked Fingerprint Motifs")
@@ -724,7 +950,7 @@ def plot_only_from_exports(
         fig, ax = plt.subplots(figsize=(7.2, 4.6))
         vals = contrib[top_idx]
         feats = [feature_display[i] for i in top_idx]
-        ax.barh(np.arange(len(top_idx)), vals, color=["#C44E52" if v > 0 else "#4C72B0" for v in vals], edgecolor="black", linewidth=0.5)
+        ax.barh(np.arange(len(top_idx)), vals, color=["#BC6A65" if v > 0 else "#4F7396" for v in vals], edgecolor="black", linewidth=0.5)
         ax.set_yticks(np.arange(len(top_idx)))
         ax.set_yticklabels(feats)
         ax.invert_yaxis()
@@ -732,6 +958,10 @@ def plot_only_from_exports(
         pred_txt = f"{float(y_prob[sample_idx]):.3f}" if y_prob.size == len(shap_values) else "NA"
         ax.set_title(f"{model_key} | Local Contributors | id={ids[sample_idx]} | p={pred_txt}")
         ax.set_xlabel("SHAP value")
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color("black")
+            spine.set_linewidth(1.0)
         _save(fig, "D_local_top_contributors")
 
         fig = plt.figure(figsize=(8.2, 5.2))
@@ -740,6 +970,15 @@ def plot_only_from_exports(
         # SHAP may create multiple axes/text artists and override styles; enforce final bounds/colors.
         vertical_text_tokens = {"|", "│", "┃", "┆", "┇"}
         for ax_w in fig.axes:
+            try:
+                for patch in ax_w.patches:
+                    fc = patch.get_facecolor()
+                    if fc[0] > 0.5:
+                        patch.set_facecolor("#B85A5A")
+                    else:
+                        patch.set_facecolor("#4F7396")
+            except Exception:
+                pass
             try:
                 left, _ = ax_w.get_xlim()
                 ax_w.set_xlim(left, 1.0)
@@ -774,8 +1013,10 @@ def plot_only_from_exports(
             except Exception:
                 pass
             try:
-                ax_w.spines["top"].set_visible(False)
-                ax_w.spines["right"].set_visible(False)
+                for spine in ax_w.spines.values():
+                    spine.set_visible(True)
+                    spine.set_color("black")
+                    spine.set_linewidth(1.0)
             except Exception:
                 pass
         for txt in fig.texts:
@@ -800,6 +1041,88 @@ def plot_only_from_exports(
         plt.title(f"{model_key} | Local Waterfall | id={ids[sample_idx]}", fontsize=11, pad=10)
         plt.tight_layout()
         _save(fig, "D_local_waterfall")
+        
+        if smiles and sample_idx < len(smiles):
+            sample_smiles = smiles[sample_idx]
+            mol = Chem.MolFromSmiles(sample_smiles)
+            if mol is not None:
+                try:
+                    from rdkit.Chem.Draw import rdMolDraw2D
+                    bit_info = {}
+                    AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048, bitInfo=bit_info)
+                    
+                    highlight_atoms = {}
+                    highlight_bonds = {}
+                    
+                    for i in top_idx:
+                        fname = feature_names_raw[i]
+                        shap_val = contrib[i]
+                        if fname.startswith("fp_"):
+                            try:
+                                bit_id = int(fname.split("fp_")[1])
+                            except ValueError:
+                                continue
+                            
+                            color = (0.737, 0.416, 0.396, 0.6) if shap_val > 0 else (0.310, 0.451, 0.588, 0.6)
+                            
+                            if bit_id in bit_info:
+                                for atom_idx, radius in bit_info[bit_id]:
+                                    if radius == 0:
+                                        if atom_idx not in highlight_atoms:
+                                            highlight_atoms[atom_idx] = color
+                                    else:
+                                        env = Chem.FindAtomEnvironmentOfRadiusN(mol, radius, atom_idx)
+                                        for bond_idx in env:
+                                            if bond_idx not in highlight_bonds:
+                                                highlight_bonds[bond_idx] = color
+                                            bond = mol.GetBondWithIdx(bond_idx)
+                                            aid1 = bond.GetBeginAtomIdx()
+                                            aid2 = bond.GetEndAtomIdx()
+                                            if aid1 not in highlight_atoms: highlight_atoms[aid1] = color
+                                            if aid2 not in highlight_atoms: highlight_atoms[aid2] = color
+                    
+                    drawer = rdMolDraw2D.MolDraw2DSVG(600, 600)
+                    options = drawer.drawOptions()
+                    options.backgroundColour = (1, 1, 1, 1)
+                    options.legendFontSize = 24
+                    
+                    mol_prep = rdMolDraw2D.PrepareMolForDrawing(mol)
+                    legend_txt = f"{model_key} | id={ids[sample_idx]} | Local FP Motifs"
+                    
+                    drawer.DrawMolecule(
+                        mol_prep,
+                        legend=legend_txt,
+                        highlightAtoms=list(highlight_atoms.keys()),
+                        highlightAtomColors=highlight_atoms,
+                        highlightBonds=list(highlight_bonds.keys()),
+                        highlightBondColors=highlight_bonds
+                    )
+                    drawer.FinishDrawing()
+                    
+                    out_svg = model_dir / "D_local_molecule_motifs.svg"
+                    with open(out_svg, "w") as f:
+                        f.write(drawer.GetDrawingText())
+                        
+                    try:
+                        drawer_png = rdMolDraw2D.MolDraw2DCairo(600, 600)
+                        options_png = drawer_png.drawOptions()
+                        options_png.backgroundColour = (1, 1, 1, 1)
+                        options_png.legendFontSize = 24
+                        drawer_png.DrawMolecule(
+                            mol_prep,
+                            legend=legend_txt,
+                            highlightAtoms=list(highlight_atoms.keys()),
+                            highlightAtomColors=highlight_atoms,
+                            highlightBonds=list(highlight_bonds.keys()),
+                            highlightBondColors=highlight_bonds
+                        )
+                        drawer_png.FinishDrawing()
+                        with open(model_dir / "D_local_molecule_motifs.png", "wb") as f:
+                            f.write(drawer_png.GetDrawingText())
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print(f"[WARN] Local molecule motifs drawing skipped: {e}")
 
 
 def main() -> None:
@@ -814,10 +1137,18 @@ def main() -> None:
             output_dir=args.output_dir,
             local_id=args.local_id,
             dpi=600,
+            annotate_fp=args.annotate_fp,
         )
         print("[OK] Plot-only export complete")
         print(f"  - Model: {target_model}")
-        print(f"  - Output dir: {(args.output_dir or (_resolve_split_dir(args.run_dir, int(args.split_seed)) / 'shap_analysis')) / target_model}")
+        out_model_dir = (args.output_dir or (_resolve_split_dir(args.run_dir, int(args.split_seed)) / 'shap_analysis')) / target_model
+        print(f"  - Output dir: {out_model_dir}")
+        if args.draw_motifs:
+            csv_path = out_model_dir / "fp_motif_demasked.csv"
+            if csv_path.exists():
+                svg_dir = csv_path.parent / "fp_motif_demasked_svgs"
+                draw_demasked_motifs(csv_path, svg_dir)
+                print(f"  - Motif SVGs generated in: {svg_dir}")
         return
 
     cfg = ShapConfig(
@@ -839,6 +1170,13 @@ def main() -> None:
     print(f"  - Output dir: {summary['output_dir']}")
     print(f"  - Models: {', '.join(summary['models'])}")
 
+    if args.draw_motifs:
+        for model_key in summary['models']:
+            csv_path = Path(summary['output_dir']) / model_key / "fp_motif_demasked.csv"
+            if csv_path.exists():
+                svg_dir = csv_path.parent / "fp_motif_demasked_svgs"
+                draw_demasked_motifs(csv_path, svg_dir)
+                print(f"  - Motif SVGs for {model_key} generated in: {svg_dir}")
 
 if __name__ == "__main__":
     main()
@@ -901,6 +1239,7 @@ if _IN_IPYTHON:
     # --- Inputs ---
     OUT_DIR = Path("../models_out/qsar_ml_20260412_162829/split_seed_12345/shap_analysis")     # Relative Path
     MODEL_KEY = "SVC"   # "LR" or "SVC"
+    ANNOTATE_FP = True
 
     npz_path = OUT_DIR / MODEL_KEY / "shap_values_external.npz"
     imp_path = OUT_DIR / MODEL_KEY / "feature_importance.csv"
@@ -927,8 +1266,24 @@ if _IN_IPYTHON:
         feature_types = [str(x) for x in np.atleast_1d(data["feature_types"]).tolist()]
         feature_display = [str(x) for x in np.atleast_1d(data["feature_display"]).tolist()]
 
+    if ANNOTATE_FP:
+        annotations = _get_motif_annotations(fp_demasked_path)
+        for i, name in enumerate(feature_names_raw):
+            if name in annotations:
+                feature_display[i] = f"{feature_display[i]} ({annotations[name]})"
+    else:
+        annotations = {}
+
     X_df = pd.DataFrame(X, columns=feature_display)
     imp_df = pd.read_csv(imp_path)
+
+    def update_imp_display(row):
+        fname = str(row["feature"])
+        fdisp = str(row["feature_display"])
+        if fname in annotations:
+            return f"{fdisp} ({annotations[fname]})"
+        return fdisp
+    imp_df["feature_display"] = imp_df.apply(update_imp_display, axis=1)
 
 
     def _save_fig(fig, name: str):
@@ -939,6 +1294,8 @@ if _IN_IPYTHON:
         fig.savefig(out_dir / f"{name}.svg", bbox_inches="tight")
 
     # (A) Global SHAP summary plot (top-20; descriptor+fp mixed; colored by feature value)
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap_slate_gold = LinearSegmentedColormap.from_list("slate_gold", ["#4F7396", "#D4AF37"])
     fig = plt.figure(figsize=(7.2, 5.2))
 
     shap.summary_plot(
@@ -947,11 +1304,16 @@ if _IN_IPYTHON:
         feature_names=feature_display,
         max_display=PLOT_STYLE["max_display"],
         show=False,
-        cmap="viridis",
+        cmap=cmap_slate_gold,
     )
 
     plt.xlabel("SHAP value (impact on model output)")
     plt.title(f"{MODEL_KEY} | SHAP Summary", fontsize=11, pad=10)
+
+    for spine in plt.gca().spines.values():
+        spine.set_visible(True)
+        spine.set_color("black")
+        spine.set_linewidth(1.0)
 
     plt.tight_layout()
     _save_fig(fig, "A_global_shap_summary_beeswarm")
@@ -966,7 +1328,7 @@ if _IN_IPYTHON:
     if not desc_df.empty:
         fig, ax = plt.subplots(figsize=(6.8, 5.6))
         y = np.arange(len(desc_df))
-        ax.barh(y, desc_df["mean_abs_shap"].to_numpy(), color="#4C72B0", edgecolor="black", linewidth=0.6, alpha=0.9)
+        ax.barh(y, desc_df["mean_abs_shap"].to_numpy(), color="#4F7396", edgecolor="black", linewidth=0.6, alpha=0.9)
         ax.set_yticks(y)
         ax.set_yticklabels(desc_df["feature_display"].astype(str).tolist())
         ax.invert_yaxis()
@@ -983,10 +1345,12 @@ if _IN_IPYTHON:
         if not fp_df.empty:
             fig, ax = plt.subplots(figsize=(8.8, 6.2))
             y = np.arange(len(fp_df))
-            ax.barh(y, fp_df["mean_abs_shap_global"].to_numpy(), color="#55A868", edgecolor="black", linewidth=0.6, alpha=0.9)
+            ax.barh(y, fp_df["mean_abs_shap_global"].to_numpy(), color="#769A77", edgecolor="black", linewidth=0.6, alpha=0.9)
             labels = []
             for _, row in fp_df.iterrows():
-                labels.append(f"bit {int(row['bit_id'])} | f={float(row['occurrence_fraction']):.2f}")
+                fname = f"fp_{int(row['bit_id'])}"
+                annot = f" ({annotations[fname]})" if fname in annotations else ""
+                labels.append(f"bit {int(row['bit_id'])}{annot} | f={float(row['occurrence_fraction']):.2f}")
             ax.set_yticks(y)
             ax.set_yticklabels(labels)
             ax.invert_yaxis()
@@ -1016,7 +1380,7 @@ if _IN_IPYTHON:
         top_values = contrib[top_idx]
 
         fig, ax = plt.subplots(figsize=(7.2, 4.6))
-        colors = ["#C44E52" if v > 0 else "#4C72B0" for v in top_values]
+        colors = ["#BC6A65" if v > 0 else "#4F7396" for v in top_values]
         ypos = np.arange(len(top_idx))
         ax.barh(ypos, top_values, color=colors, edgecolor="black", linewidth=0.5)
         ax.set_yticks(ypos)
@@ -1028,6 +1392,10 @@ if _IN_IPYTHON:
         ax.set_title(title)
         ax.set_xlabel("SHAP value")
         ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color("black")
+            spine.set_linewidth(1.0)
         plt.tight_layout()
         _save_fig(fig, "D_local_top_contributors")
         plt.show()
@@ -1041,10 +1409,114 @@ if _IN_IPYTHON:
             )
             fig = plt.figure(figsize=(8.2, 5.2))
             shap.plots.waterfall(explanation, max_display=top_k, show=False)
+            for ax_w in fig.axes:
+                try:
+                    for patch in ax_w.patches:
+                        fc = patch.get_facecolor()
+                        patch.set_facecolor("#B85A5A" if fc[0] > 0.5 else "#4F7396")
+                except Exception:
+                    pass
+                try:
+                    for spine in ax_w.spines.values():
+                        spine.set_visible(True)
+                        spine.set_color("black")
+                        spine.set_linewidth(1.0)
+                except Exception:
+                    pass
             plt.title(f"{MODEL_KEY} | Local Waterfall | id={ids[sample_idx]}", fontsize=11, pad=10)
             plt.tight_layout()
             _save_fig(fig, "D_local_waterfall")
             plt.show()
         except Exception as e:
             print(f"[WARN] Local waterfall skipped: {e}")
+            
+        if smiles and sample_idx < len(smiles):
+            sample_smiles = smiles[sample_idx]
+            mol = Chem.MolFromSmiles(sample_smiles)
+            if mol is not None:
+                try:
+                    from rdkit.Chem.Draw import rdMolDraw2D
+                    bit_info = {}
+                    AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048, bitInfo=bit_info)
+                    
+                    highlight_atoms = {}
+                    highlight_bonds = {}
+                    
+                    for i in top_idx:
+                        fname = feature_names_raw[i]
+                        shap_val = contrib[i]
+                        if fname.startswith("fp_"):
+                            try:
+                                bit_id = int(fname.split("fp_")[1])
+                            except ValueError:
+                                continue
+                            
+                            color = (0.737, 0.416, 0.396, 0.6) if shap_val > 0 else (0.310, 0.451, 0.588, 0.6)
+                            
+                            if bit_id in bit_info:
+                                for atom_idx, radius in bit_info[bit_id]:
+                                    if radius == 0:
+                                        if atom_idx not in highlight_atoms:
+                                            highlight_atoms[atom_idx] = color
+                                    else:
+                                        env = Chem.FindAtomEnvironmentOfRadiusN(mol, radius, atom_idx)
+                                        for bond_idx in env:
+                                            if bond_idx not in highlight_bonds:
+                                                highlight_bonds[bond_idx] = color
+                                            bond = mol.GetBondWithIdx(bond_idx)
+                                            aid1 = bond.GetBeginAtomIdx()
+                                            aid2 = bond.GetEndAtomIdx()
+                                            if aid1 not in highlight_atoms: highlight_atoms[aid1] = color
+                                            if aid2 not in highlight_atoms: highlight_atoms[aid2] = color
+                    
+                    drawer = rdMolDraw2D.MolDraw2DSVG(600, 600)
+                    options = drawer.drawOptions()
+                    options.backgroundColour = (1, 1, 1, 1)
+                    options.legendFontSize = 24
+                    
+                    mol_prep = rdMolDraw2D.PrepareMolForDrawing(mol)
+                    legend_txt = f"{MODEL_KEY} | id={ids[sample_idx]} | Local FP Motifs"
+                    
+                    drawer.DrawMolecule(
+                        mol_prep,
+                        legend=legend_txt,
+                        highlightAtoms=list(highlight_atoms.keys()),
+                        highlightAtomColors=highlight_atoms,
+                        highlightBonds=list(highlight_bonds.keys()),
+                        highlightBondColors=highlight_bonds
+                    )
+                    drawer.FinishDrawing()
+                    
+                    out_model_dir = OUT_DIR / MODEL_KEY
+                    out_model_dir.mkdir(parents=True, exist_ok=True)
+                    out_svg = out_model_dir / "D_local_molecule_motifs.svg"
+                    with open(out_svg, "w") as f:
+                        f.write(drawer.GetDrawingText())
+                        
+                    try:
+                        drawer_png = rdMolDraw2D.MolDraw2DCairo(600, 600)
+                        options_png = drawer_png.drawOptions()
+                        options_png.backgroundColour = (1, 1, 1, 1)
+                        options_png.legendFontSize = 24
+                        drawer_png.DrawMolecule(
+                            mol_prep,
+                            legend=legend_txt,
+                            highlightAtoms=list(highlight_atoms.keys()),
+                            highlightAtomColors=highlight_atoms,
+                            highlightBonds=list(highlight_bonds.keys()),
+                            highlightBondColors=highlight_bonds
+                        )
+                        drawer_png.FinishDrawing()
+                        with open(out_model_dir / "D_local_molecule_motifs.png", "wb") as f:
+                            f.write(drawer_png.GetDrawingText())
+                    except Exception:
+                        pass
+                        
+                    try:
+                        from IPython.display import SVG, display
+                        display(SVG(drawer.GetDrawingText()))
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print(f"[WARN] Local molecule motifs drawing skipped: {e}")
 # %%

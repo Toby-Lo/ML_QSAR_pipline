@@ -2,17 +2,20 @@
 Training Summary Aggregator - Compiles per-seed metrics from QSAR ML pipeline runs.
 
 Purpose:
-  Aggregate external test set metrics across multiple random seeds to identify
-  which seed configuration is most representative (e.g., closest to mean).
+  Aggregate external test set or cross-validation metrics across multiple random seeds
+  to identify which seed configuration is most representative (e.g., closest to mean).
   
 Usage:
   python step11_training_summary.py --run-dir models_out/qsar_ml_20260410_124055
   python step11_training_summary.py --run-dir models_out/qsar_ml_20260410_124055 \\
                                     --output results/seed_metrics_summary.csv \\
                                     --metrics mcc,f1,accuracy \\
-                                    --sort-by mcc
+                                    --sort-by RFC_mcc \\
+                                    --stage cv
 
-python scripts/step11_training_summary.py --run-dir models_out/qsar_ml_20260412_162829
+python scripts/step11_training_summary.py --run-dir models_out/qsar_ml_20260412_162829 \
+--stage cv --sort-metric RFC_mcc
+
 
 """
 
@@ -66,11 +69,12 @@ def find_seed_directories(run_dir: Path) -> List[int]:
     return sorted(seeds)
 
 
-def parse_external_test_summary(csv_path: Path) -> Dict[str, Dict[str, float]]:
-    """Parse external_test_summary.csv for a single seed.
+def parse_summary_file(csv_path: Path, stage: str) -> Dict[str, Dict[str, float]]:
+    """Parse metrics summary CSV for a single seed.
     
     Args:
-        csv_path: Path to external_test_summary.csv
+        csv_path: Path to the CSV file
+        stage: 'external' or 'cv'
         
     Returns:
         Dict mapping model name -> dict of metrics
@@ -80,17 +84,25 @@ def parse_external_test_summary(csv_path: Path) -> Dict[str, Dict[str, float]]:
         df = pd.read_csv(csv_path)
         results = {}
         
-        for _, row in df.iterrows():
-            model = row['model']
-            # Extract all numeric columns that are metric values
-            metrics = {}
-            for col in df.columns:
-                if col != 'model' and '_mean_std' not in col and '_std' not in col:
-                    # _mean columns are the actual metric values
-                    if col.endswith('_mean'):
-                        metric_name = col.replace('_mean', '')
-                        metrics[metric_name] = float(row[col])
-            results[model] = metrics
+        if stage == "external":
+            for _, row in df.iterrows():
+                model = row['model']
+                # Extract all numeric columns that are metric values
+                metrics = {}
+                for col in df.columns:
+                    if col != 'model' and '_mean_std' not in col and '_std' not in col:
+                        # _mean columns are the actual metric values
+                        if col.endswith('_mean'):
+                            metric_name = col.replace('_mean', '')
+                            metrics[metric_name] = float(row[col])
+                results[model] = metrics
+        elif stage == "cv":
+            for model, group in df.groupby('model'):
+                metrics = {}
+                for _, row in group.iterrows():
+                    if not pd.isna(row['mean']):
+                        metrics[row['metric']] = float(row['mean'])
+                results[model] = metrics
         
         return results
     except Exception as e:
@@ -100,12 +112,14 @@ def parse_external_test_summary(csv_path: Path) -> Dict[str, Dict[str, float]]:
 
 def aggregate_metrics(
     run_dir: Path,
+    stage: str = "external",
     seeds: Optional[List[int]] = None
 ) -> Tuple[Dict[int, Dict], List[str], List[str]]:
     """Aggregate metrics from all seeds.
     
     Args:
         run_dir: Path to qsar_ml_YYYYMMDD_HHMMSS directory
+        stage: 'external' or 'cv'
         seeds: Specific seeds to process (if None, find all)
         
     Returns:
@@ -126,14 +140,15 @@ def aggregate_metrics(
     
     for seed in seeds:
         seed_dir = run_dir / f"split_seed_{seed}"
-        results_file = seed_dir / "results" / "external_test_summary.csv"
+        file_name = "external_test_summary.csv" if stage == "external" else "cv_summary.csv"
+        results_file = seed_dir / "results" / file_name
         
         if not results_file.exists():
             logger.warning(f"Results file not found: {results_file}")
             continue
         
         logger.info(f"Processing seed {seed}...")
-        metrics = parse_external_test_summary(results_file)
+        metrics = parse_summary_file(results_file, stage)
         aggregated[seed] = metrics
         
         for model, model_metrics in metrics.items():
@@ -275,6 +290,13 @@ Examples:
         help="Path to qsar_ml_YYYYMMDD_HHMMSS run directory"
     )
     parser.add_argument(
+        "--stage",
+        type=str,
+        choices=["external", "cv"],
+        default="external",
+        help="Which stage to summarize: external (default) or cv"
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -295,9 +317,8 @@ Examples:
     parser.add_argument(
         "--sort-by",
         type=str,
-        choices=["closest-to-mean", "mcc", "f1", "accuracy"],
         default="closest-to-mean",
-        help="Sort seeds by: closest-to-mean (Euclidean), or distance to a specific metric"
+        help="Sort seeds by: closest-to-mean (Euclidean), a general metric (e.g., mcc), or a specific model metric (e.g., RFC_mcc)"
     )
     parser.add_argument(
         "--sort-metric",
@@ -321,8 +342,8 @@ Examples:
     
     try:
         # Aggregate data
-        logger.info("Aggregating metrics from all seeds...")
-        aggregated, all_models, all_metrics = aggregate_metrics(args.run_dir)
+        logger.info(f"Aggregating {args.stage} metrics from all seeds...")
+        aggregated, all_models, all_metrics = aggregate_metrics(args.run_dir, stage=args.stage)
         
         # Filter to requested metrics/models
         available_metrics = [m for m in requested_metrics if m in all_metrics]
@@ -345,33 +366,63 @@ Examples:
         # Create summary table
         summary_df = create_summary_table(aggregated, final_models, available_metrics)
         
-        # Calculate distances and sort
-        distances = calculate_distance_from_mean(
-            summary_df,
-            target_metric=args.sort_metric
-        )
-        
-        if distances:
-            closest_seed = min(distances, key=distances.get)
+        # Determine sorting logic
+        is_distance = False
+        sort_values = {}
+        if args.sort_by == "closest-to-mean":
+            sort_values = calculate_distance_from_mean(summary_df, target_metric=args.sort_metric)
+            sorted_seeds = sorted(sort_values, key=sort_values.get) if sort_values else []
+            sort_desc = "closest-to-mean" + (f" ({args.sort_metric})" if args.sort_metric else "")
+            is_distance = True
+        else:
+            if args.sort_by in summary_df.columns:
+                for idx in summary_df.index:
+                    if idx.startswith("seed_"):
+                        seed = int(idx.split("_")[1])
+                        sort_values[seed] = summary_df.loc[idx, args.sort_by]
+                sorted_seeds = sorted(sort_values, key=sort_values.get, reverse=True) if sort_values else []
+                sort_desc = f"highest {args.sort_by}"
+            else:
+                cols = [c for c in summary_df.columns if c.endswith(f"_{args.sort_by}")]
+                if not cols:
+                    logger.warning(f"Sort metric '{args.sort_by}' not found. Falling back to closest-to-mean.")
+                    sort_values = calculate_distance_from_mean(summary_df)
+                    sorted_seeds = sorted(sort_values, key=sort_values.get) if sort_values else []
+                    sort_desc = "closest-to-mean (fallback)"
+                    is_distance = True
+                else:
+                    for idx in summary_df.index:
+                        if idx.startswith("seed_"):
+                            seed = int(idx.split("_")[1])
+                            sort_values[seed] = summary_df.loc[idx, cols].mean()
+                    sorted_seeds = sorted(sort_values, key=sort_values.get, reverse=True) if sort_values else []
+                    sort_desc = f"highest average {args.sort_by}"
+
+        if sort_values:
+            top_seed = sorted_seeds[0] if sorted_seeds else None
             logger.info(
                 f"\n{'='*80}"
-                f"\n  Seed Analysis (sorted by {args.sort_by})"
+                f"\n  Seed Analysis (sorted by {sort_desc})"
                 f"\n{'='*80}"
             )
-            for seed in sorted(distances, key=lambda s: distances[s]):
-                distance = distances[seed]
-                marker = " ← CLOSEST TO MEAN" if seed == closest_seed else ""
-                logger.info(f"  seed_{seed:5d} | distance: {distance:.6f}{marker}")
+            for seed in sorted_seeds:
+                val = sort_values[seed]
+                if is_distance:
+                    marker = " ← CLOSEST TO MEAN" if seed == top_seed else ""
+                    logger.info(f"  seed_{seed:5d} | distance: {val:.6f}{marker}")
+                else:
+                    marker = " ← BEST" if seed == top_seed else ""
+                    logger.info(f"  seed_{seed:5d} | value: {val:.6f}{marker}")
         
         # Sort and reorder DataFrame
-        sorted_seeds = sorted(distances, key=distances.get) if distances else []
         final_order = ["MEAN", "STD"] + [f"seed_{s}" for s in sorted_seeds]
         summary_df = summary_df.loc[final_order]
         
         # Determine output path
         output_path = args.output
         if output_path is None:
-            output_path = args.run_dir / "results" / "seed_metrics_summary.csv"
+            output_name = "seed_metrics_summary.csv" if args.stage == "external" else "seed_cv_metrics_summary.csv"
+            output_path = args.run_dir / "results" / output_name
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -384,13 +435,18 @@ Examples:
         logger.info(f"\n{summary_df.to_string()}")
         
         # Additional analysis: suggest seed for downstream analysis
-        if distances:
-            closest_seed = min(distances, key=distances.get)
+        if sort_values and sorted_seeds:
+            top_seed = sorted_seeds[0]
+            val = sort_values[top_seed]
+            if is_distance:
+                rec_text = f"closest to mean, distance={val:.6f}"
+            else:
+                rec_text = f"best {args.sort_by}, value={val:.6f}"
             logger.info(
                 f"\n{'='*80}"
                 f"\nRECOMMENDATION FOR DOWNSTREAM ANALYSIS:"
-                f"\n  Use seed_{closest_seed} (closest to mean, distance={distances[closest_seed]:.6f})"
-                f"\n  Run: python scripts/step40_plot_performance.py --base-dir {args.run_dir} --split-seed {closest_seed}"
+                f"\n  Use seed_{top_seed} ({rec_text})"
+                f"\n  Run: python scripts/step40_plot_performance.py --base-dir {args.run_dir} --split-seed {top_seed}"
                 f"\n{'='*80}"
             )
         

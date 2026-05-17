@@ -10,6 +10,7 @@ python scripts/step40_plot_performance.py \
   --include-external \
   --include-cv \
   --boxplot-stage both \
+  --error-type std \
   --output-dir models_out/qsar_ml_20260412_162829/figures/performance/ \
   --polar-show-values 
 
@@ -62,6 +63,14 @@ METRIC_LABELS = {
 BOXPLOT_ALLOWED_METRICS = {"mcc", "f1", "accuracy", "precision", "recall"}
 POLAR_METRIC_ORDER = ["mcc", "f1", "accuracy", "precision", "recall"]
 CI_Z = 1.96
+MODEL_COLORS = {
+    'ETC': '#B08B86',   # 莫兰迪肉粉/浅褐
+    'RFC': '#C3B083',   # 暗金/莫兰迪淡黄
+    'SVC': '#1F77B4',   # 核心高亮蓝色
+    'MLP': '#8F93B5',   # 莫兰迪紫灰/蓝灰
+    'XGBC': '#8AA68A',  # 莫兰迪豆绿/灰绿
+    'LR': '#A8829A'     # 莫兰迪暗紫/粉灰
+}
 
 
 # %%
@@ -86,6 +95,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=600, help="Figure DPI")
     parser.add_argument("--font", default="Cambria", help="Serif font for publication style")
     parser.add_argument("--polar-show-values", action="store_true", help="Show numeric values above polar bars")
+    parser.add_argument(
+        "--error-type",
+        choices=["std", "ci95"],
+        default="std",
+        help="Error type for plots (std or ci95)",
+    )
     return parser.parse_args()
 
 
@@ -157,31 +172,40 @@ def interpolate_curve(x: np.ndarray, y: np.ndarray, grid: np.ndarray) -> np.ndar
 
 
 # %%
-def ci95_from_samples(samples: List[np.ndarray]) -> np.ndarray:
+def error_from_samples(samples: List[np.ndarray], error_type: str = "ci95") -> np.ndarray:
     arr = np.asarray(samples)
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
     if arr.shape[0] <= 1:
         return np.zeros(arr.shape[1], dtype=float)
+    if error_type == "std":
+        return np.std(arr, axis=0, ddof=0)
     sem = np.std(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
     return CI_Z * sem
 
 
-def ci95_from_scalars(values: List[float]) -> float:
+def error_from_scalars(values: List[float], error_type: str = "ci95") -> float:
     arr = np.asarray(values, dtype=float)
     if arr.size <= 1:
         return 0.0
+    if error_type == "std":
+        return float(np.std(arr, ddof=0))
     sem = np.std(arr, ddof=1) / np.sqrt(arr.size)
     return float(CI_Z * sem)
 
 
 def get_or_assign_model_colors(models: List[str], palette_name: str, color_map: Dict[str, tuple]) -> None:
+    """Assign colors to models from predefined MODEL_COLORS dict, with fallback to palette."""
     palette = sns.color_palette(palette_name, max(len(models), 3) * 3)
     next_idx = len(color_map)
     for model in sorted(models):
         if model not in color_map:
-            color_map[model] = palette[next_idx % len(palette)]
-            next_idx += 1
+            # Try to use predefined color first, fallback to palette
+            if model in MODEL_COLORS:
+                color_map[model] = MODEL_COLORS[model]
+            else:
+                color_map[model] = palette[next_idx % len(palette)]
+                next_idx += 1
 
 
 def prepare_curves(prediction_files: List[Path]) -> tuple[Dict[str, Dict[str, List[np.ndarray]]], float]:
@@ -244,10 +268,14 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
                 palette_name: str,
                 dpi: int,
                 font: str,
-                global_color_map: Dict[str, tuple]) -> None:
+                global_color_map: Dict[str, tuple],
+                error_type: str = "ci95") -> None:
     if not curves:
         return
     configure_plotting(font)
+    
+    import matplotlib.ticker as ticker
+    
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     model_entries: List[Dict[str, object]] = []
     for model, data in curves.items():
@@ -256,9 +284,9 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         fpr_grid = data["roc_grid"]
         recall_grid = data["pr_grid"]
         mean_tpr = np.mean(data["roc"], axis=0)
-        ci_tpr = ci95_from_samples(data["roc"])
+        err_tpr = error_from_samples(data["roc"], error_type)
         mean_prec = np.mean(data["pr"], axis=0)
-        ci_prec = ci95_from_samples(data["pr"])
+        err_prec = error_from_samples(data["pr"], error_type)
         roc_auc_vals = [auc(fpr_grid, arr) for arr in data["roc"]]
         pr_auc_vals = [auc(recall_grid, arr) for arr in data["pr"]]
         model_entries.append({
@@ -266,23 +294,23 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
             "fpr_grid": fpr_grid,
             "recall_grid": recall_grid,
             "mean_tpr": mean_tpr,
-            "ci_tpr": ci_tpr,
+            "err_tpr": err_tpr,
             "mean_prec": mean_prec,
-            "ci_prec": ci_prec,
+            "err_prec": err_prec,
             "roc_auc_mean": float(np.mean(roc_auc_vals)),
-            "roc_auc_ci": ci95_from_scalars(roc_auc_vals),
+            "roc_auc_err": error_from_scalars(roc_auc_vals, error_type),
             "pr_auc_mean": float(np.mean(pr_auc_vals)),
-            "pr_auc_ci": ci95_from_scalars(pr_auc_vals),
+            "pr_auc_err": error_from_scalars(pr_auc_vals, error_type),
         })
 
     roc_sorted = sorted(
         model_entries,
-        key=lambda d: (d["roc_auc_mean"], d["roc_auc_ci"]),
+        key=lambda d: (d["roc_auc_mean"], d["roc_auc_err"]),
         reverse=True,
     )
     pr_sorted = sorted(
         model_entries,
-        key=lambda d: (d["pr_auc_mean"], d["pr_auc_ci"]),
+        key=lambda d: (d["pr_auc_mean"], d["pr_auc_err"]),
         reverse=True,
     )
     get_or_assign_model_colors([str(entry["model"]) for entry in model_entries], palette_name, global_color_map)
@@ -292,18 +320,18 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         color = global_color_map[model]
         fpr_grid = np.asarray(entry["fpr_grid"])
         mean_tpr = np.asarray(entry["mean_tpr"])
-        ci_tpr = np.asarray(entry["ci_tpr"])
+        err_tpr = np.asarray(entry["err_tpr"])
         axes[0].plot(
             fpr_grid,
             mean_tpr,
-            label=f"{model} (ROC-AUC={entry['roc_auc_mean']:.3f}±{entry['roc_auc_ci']:.3f})",
+            label=f"{model} (ROC-AUC={entry['roc_auc_mean']:.3f}±{entry['roc_auc_err']:.3f})",
             linewidth=1.5,
             color=color,
         )
         axes[0].fill_between(
             fpr_grid,
-            np.clip(mean_tpr - ci_tpr, 0, 1),
-            np.clip(mean_tpr + ci_tpr, 0, 1),
+            np.clip(mean_tpr - err_tpr, 0, 1),
+            np.clip(mean_tpr + err_tpr, 0, 1),
             color=color,
             alpha=0.1,
             linewidth=0,
@@ -314,18 +342,18 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         color = global_color_map[model]
         recall_grid = np.asarray(entry["recall_grid"])
         mean_prec = np.asarray(entry["mean_prec"])
-        ci_prec = np.asarray(entry["ci_prec"])
+        err_prec = np.asarray(entry["err_prec"])
         axes[1].plot(
             recall_grid,
             mean_prec,
-            label=f"{model} (PR-AUC={entry['pr_auc_mean']:.3f}±{entry['pr_auc_ci']:.3f})",
+            label=f"{model} (PR-AUC={entry['pr_auc_mean']:.3f}±{entry['pr_auc_err']:.3f})",
             linewidth=1.5,
             color=color,
         )
         axes[1].fill_between(
             recall_grid,
-            np.clip(mean_prec - ci_prec, 0, 1),
-            np.clip(mean_prec + ci_prec, 0, 1),
+            np.clip(mean_prec - err_prec, 0, 1),
+            np.clip(mean_prec + err_prec, 0, 1),
             color=color,
             alpha=0.1,
             linewidth=0,
@@ -369,11 +397,19 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         facecolor="white",
         framealpha=1.0,
     )
+    
     for ax in axes:
         ax.grid(False)
         for spine in ax.spines.values():
             spine.set_visible(True)
             spine.set_linewidth(1.2)
+        
+        ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+        
+        ax.yaxis.set_major_formatter(
+            ticker.FuncFormatter(lambda y, pos: "" if y == 0.0 else f"{y:.1f}")
+        )
+
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, format="svg", dpi=dpi)
@@ -547,6 +583,7 @@ def plot_polar_metric_bars(
     font: str,
     global_color_map: Dict[str, tuple],
     show_values: bool = True,
+    error_type: str = "ci95",
 ) -> None:
     if metric_df.empty:
         return
@@ -600,7 +637,7 @@ def plot_polar_metric_bars(
                 bar_idx += 1
                 continue
             mean_val = float(np.mean(vals))
-            ci_val = ci95_from_scalars(vals.tolist())
+            err_val = error_from_scalars(vals.tolist(), error_type)
             theta = theta_centers[bar_idx]
             bar_idx += 1
 
@@ -609,8 +646,8 @@ def plot_polar_metric_bars(
             y_top = inner_radius + height
             color = global_color_map.get(model, (0.5, 0.5, 0.5))
 
-            ci_low = max(0.0, mean_val - ci_val)
-            ci_high = min(1.0, mean_val + ci_val)
+            ci_low = max(0.0, mean_val - err_val)
+            ci_high = min(1.0, mean_val + err_val)
             err_low = (mean_val - ci_low) * radial_scale
             err_high = (ci_high - mean_val) * radial_scale
             color = global_color_map.get(model, sns.color_palette(palette_name)[0])
@@ -646,10 +683,12 @@ def plot_polar_metric_bars(
                 text_rotation = np.degrees(theta) - 90.0
                 if metric in {"precision", "recall"}:
                     text_rotation += 180.0
+                elif metric == "mcc" and theta > np.pi:
+                    text_rotation += 180.0
                 ax.text(
                     theta,
                     label_r,
-                    f"{mean_val:.2f}",
+                    f"{mean_val:.3f}",
                     ha="center",
                     va="center",
                     fontsize=9,
@@ -779,7 +818,7 @@ def main() -> None:
             print(f"[WARN] Could not build curves for stage '{stage}'.")
             continue
         rocpr_path = output_dir / f"{stage}_roc_pr.svg"
-        plot_roc_pr(curves, prevalence, rocpr_path, stage, args.palette, args.dpi, args.font, global_color_map)
+        plot_roc_pr(curves, prevalence, rocpr_path, stage, args.palette, args.dpi, args.font, global_color_map, args.error_type)
         print(f"[OK] Saved {stage} ROC/PR: {rocpr_path}")
 
     boxplot_stages: List[str] = []
@@ -806,6 +845,7 @@ def main() -> None:
             args.font,
             global_color_map,
             show_values=args.polar_show_values,
+            error_type=args.error_type,
         )
         print(f"[OK] Saved {stage} polar metric bars: {polar_path}")
 

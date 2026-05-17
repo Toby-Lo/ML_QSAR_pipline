@@ -698,7 +698,7 @@ def plot_robustness_composite(run_dir: Path, split_seed: int, model_key: str) ->
     if not np.isnan(actual_roc):
         ax_a.axvline(actual_roc, color="#C44E52", linestyle="--", linewidth=1.8, label=f"True-label ROC-AUC={actual_roc:.3f}")
         ax_a.legend(frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
-    ax_a.set_title("(A) ROC-AUC distribution (scrambled)")
+    ax_a.set_title("(A) ROC-AUC Scrambled Distribution")
     ax_a.set_xlabel("ROC-AUC")
     ax_a.set_ylabel("Count")
 
@@ -708,7 +708,7 @@ def plot_robustness_composite(run_dir: Path, split_seed: int, model_key: str) ->
     if not np.isnan(actual_mcc):
         ax_b.axvline(actual_mcc, color="#C44E52", linestyle="--", linewidth=1.8, label=f"True-label MCC={actual_mcc:.3f}")
         ax_b.legend(loc="upper right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
-    ax_b.set_title("(B) MCC distribution (scrambled)")
+    ax_b.set_title("(B) MCC Scrambled Distribution") 
     ax_b.set_xlabel("MCC")
     ax_b.set_ylabel("Count")
 
@@ -727,7 +727,7 @@ def plot_robustness_composite(run_dir: Path, split_seed: int, model_key: str) ->
     ax_c.set_xticklabels(bars_labels, rotation=20, ha="right")
     bar_top = float(np.nanmax(np.asarray(bars_vals, dtype=float))) if len(bars_vals) else 1.0
     ax_c.set_ylim(0.0, min(1.0, max(0.05, bar_top + 0.10)))
-    ax_c.set_title("(C) True vs scrambled performance")
+    ax_c.set_title("(C) True vs. Scrambled Performance Comparison")
     ax_c.set_ylabel("Metric value")
     roc_mu = float(summary.get("perm_roc_auc_mean", np.nan))
     roc_sd = float(summary.get("perm_roc_auc_std", np.nan))
@@ -754,7 +754,7 @@ def plot_robustness_composite(run_dir: Path, split_seed: int, model_key: str) ->
     lim_low = float(np.nanmin([np.nanmin(true_score), np.nanmin(scrambled_score)])) if len(true_score) else 0.0
     lim_high = float(np.nanmax([np.nanmax(true_score), np.nanmax(scrambled_score)])) if len(true_score) else 1.0
     ax_d.plot([lim_low, lim_high], [lim_low, lim_high], "--", color="#C44E52", linewidth=1.4, label="y = x")
-    ax_d.set_title("(D) True vs scrambled prediction scores")
+    ax_d.set_title("(D) True vs. Scrambled Prediction Scores Density")
     ax_d.set_xlabel("True-label score")
     ax_d.set_ylabel("Scrambled mean score")
     ax_d.legend(loc="upper right", frameon=True, fancybox=False, edgecolor="black", facecolor="white", framealpha=1.0)
