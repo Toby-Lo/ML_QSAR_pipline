@@ -11,9 +11,10 @@ set -euo pipefail
 #   MODE=missing bash mds/run_all_system_analyses.sh  # run only missing
 #   MODE=all     bash mds/run_all_system_analyses.sh  # run all
 
+# rm -f mds/runs/*/analysis/plots/16_*
 # for d in mds/runs/*; do [ -d "$d" ] || continue; (cd "$d" && bash ../../Analysis/16_FEL/run_pca_fel.sh); done
 # for d in mds/runs/*; do [ -d "$d" ] || continue; [ -f "$d/analysis/plots/16_PCA_Mode_Cartoon_Transition_Panel.svg" ] && continue; (cd "$d" && bash ../../Analysis/16_FEL/run_pca_fel.sh); done
-
+# for d in mds/runs/*; do [ -d "$d" ] || continue; echo "Drawing for $d..."; python3 Analysis/16_FEL/pca_fel_publication_plots.py --projection "$d/analysis/PCA_projection.dat" --outdir "$d/analysis/plots"; done
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUNS_ROOT="${RUNS_ROOT:-$ROOT_DIR/mds/runs}"
