@@ -16,7 +16,7 @@ Outputs (CSV):
 
 python3 mds/aggregate_md_results.py check --runs-root mds/runs
 
-python3 mds/aggregate_md_results.py --reference a1a0m --runs-root mds/runs --outdir mds/aggregate_outputs
+python3 mds/aggregate_md_results.py --reference a1a0m --runs-root mds/runs --outdir mds/aggregate_outputs --plot-zn-violin
 """
 
 from __future__ import annotations
@@ -116,20 +116,81 @@ def read_hbond_top1(path: Path) -> Optional[Dict[str, object]]:
         return None
     if df.empty:
         return None
-    # Use highest occupancy row.
-    occ_col = "occupancy_pct"
-    if occ_col in df.columns:
+
+    def pick_col(*candidates: str) -> Optional[str]:
+        cols = {c.strip().lower(): c for c in df.columns}
+        for cand in candidates:
+            key = cand.strip().lower()
+            if key in cols:
+                return cols[key]
+        return None
+
+    # Support both "normalized" column names and the raw report output from
+    # Analysis/09_HBond-Complex/hbond_occupancy_report.py.
+    donor_col = pick_col("donor", "Donor")
+    acceptor_col = pick_col("acceptor", "Acceptor")
+    occ_col = pick_col("occupancy_pct", "occupancy (%)", "occupancy", "Occupancy (%)", "Occupancy")
+    dist_col = pick_col("avg_distance", "avg distance (a)", "avg distance (å)", "Avg Distance (A)", "Avg Distance (Å)")
+    angle_col = pick_col("avg_angle", "avg angle (deg)", "Avg Angle (deg)")
+
+    # Use highest occupancy row when possible.
+    if occ_col is not None:
         dfx = df.sort_values(occ_col, ascending=False).reset_index(drop=True)
     else:
         dfx = df.reset_index(drop=True)
     r = dfx.iloc[0]
+
+    donor_val = str(r.get(donor_col, "")) if donor_col is not None else ""
+    acceptor_val = str(r.get(acceptor_col, "")) if acceptor_col is not None else ""
+    occ_val = float(pd.to_numeric(r.get(occ_col), errors="coerce")) if occ_col is not None else np.nan
+    dist_val = float(pd.to_numeric(r.get(dist_col), errors="coerce")) if dist_col is not None else np.nan
+    angle_val = float(pd.to_numeric(r.get(angle_col), errors="coerce")) if angle_col is not None else np.nan
+
     return {
-        "hbond_top1_donor": str(r.get("donor", "")),
-        "hbond_top1_acceptor": str(r.get("acceptor", "")),
-        "hbond_top1_occupancy_pct": float(pd.to_numeric(r.get("occupancy_pct"), errors="coerce")),
-        "hbond_top1_avg_distance": float(pd.to_numeric(r.get("avg_distance"), errors="coerce")),
-        "hbond_top1_avg_angle": float(pd.to_numeric(r.get("avg_angle"), errors="coerce")),
+        "hbond_top1_donor": donor_val,
+        "hbond_top1_acceptor": acceptor_val,
+        "hbond_top1_occupancy_pct": occ_val,
+        "hbond_top1_avg_distance": dist_val,
+        "hbond_top1_avg_angle": angle_val,
     }
+
+
+def extract_zn_last_50ns_stats(path: Path, dt: float, ntwx: int, stride: int = 1) -> Optional[Tuple[float, float]]:
+    arr = read_table(path)
+    if arr is None or arr.shape[1] < 2:
+        return None
+    t = (arr[:, 0].astype(float) * ntwx * stride * dt) / 1000.0
+    y = arr[:, 1].astype(float)
+    mask = np.isfinite(t) & np.isfinite(y)
+    t = t[mask]
+    y = y[mask]
+    if len(t) == 0:
+        return None
+    t_max = np.max(t)
+    last_mask = t >= max(0.0, t_max - 50.0)
+    y_last = y[last_mask]
+    if len(y_last) == 0:
+        return None
+    return float(np.mean(y_last)), float(np.std(y_last, ddof=1) if len(y_last) > 1 else 0.0)
+
+
+def extract_zn_last_50ns_raw(path: Path, dt: float, ntwx: int, stride: int = 1) -> Optional[np.ndarray]:
+    arr = read_table(path)
+    if arr is None or arr.shape[1] < 2:
+        return None
+    t = (arr[:, 0].astype(float) * ntwx * stride * dt) / 1000.0
+    y = arr[:, 1].astype(float)
+    mask = np.isfinite(t) & np.isfinite(y)
+    t = t[mask]
+    y = y[mask]
+    if len(t) == 0:
+        return None
+    t_max = np.max(t)
+    last_mask = t >= max(0.0, t_max - 50.0)
+    y_last = y[last_mask]
+    if len(y_last) == 0:
+        return None
+    return y_last
 
 
 def parse_final_gbsa_delta_g(path: Path) -> Optional[Dict[str, float]]:
@@ -336,6 +397,7 @@ def plot_multi_grid(
     nrows: int = 3,
     ncols: int = 3,
     xlabel: str = "Time (ns)",
+    grid_legend_no_box: bool = False,
 ) -> None:
     if not data:
         return
@@ -420,14 +482,18 @@ def plot_multi_grid(
             
             # System Name top right
             sys_up = sys_name.upper()
+            text_props = {
+                "transform": ax.transAxes,
+                "ha": "right", "va": "top",
+                "fontsize": 12, "fontweight": "bold",
+                "color": "black",
+            }
+            if not grid_legend_no_box:
+                text_props["bbox"] = dict(boxstyle="round,pad=0.1", fc="white", ec="black", lw=1.2, alpha=0.9)
             ax.text(
                 0.97, 0.95,
                 sys_up,
-                transform=ax.transAxes,
-                ha="right", va="top",
-                fontsize=12, fontweight="bold",
-                color="black",
-                bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="black", lw=1.2, alpha=0.9)
+                **text_props
             )
             
             if r == nrows - 1 or idx == len(ordered) - 1:
@@ -529,6 +595,7 @@ def plot_pca_cartoon_grid(
     reference: str,
     nrows: int = 3,
     ncols: int = 3,
+    grid_legend_no_box: bool = False,
 ) -> None:
     # Prefer PNG (raster rendered by PyMOL). Fallback to SVG if PNG missing is skipped.
     items: List[Tuple[str, Path]] = []
@@ -586,16 +653,21 @@ def plot_pca_cartoon_grid(
                 img = plt.imread(img_path)
                 ax.imshow(img)
                 # Boxed system label inside each panel.
+                text_props = {
+                    "transform": ax.transAxes,
+                    "ha": "left",
+                    "va": "top",
+                    "fontsize": 12,
+                    "fontweight": "bold",
+                    "color": "black",
+                }
+                if not grid_legend_no_box:
+                    text_props["bbox"] = {"boxstyle": "round,pad=0.05", "fc": "white", "ec": "#333333", "lw": 0.8, "alpha": 0.95}
                 ax.text(
                     0.03,
                     0.94,
                     sys_name.upper(),
-                    transform=ax.transAxes,
-                    ha="left",
-                    va="top",
-                    fontsize=12,
-                    color="black",
-                    bbox={"boxstyle": "round,pad=0.05", "fc": "white", "ec": "#333333", "lw": 0.8, "alpha": 0.95},
+                    **text_props,
                 )
             except Exception:
                 ax.text(0.5, 0.5, f"{sys_name}\n(image read failed)", ha="center", va="center")
@@ -782,6 +854,200 @@ def plot_rmsf_single_with_key_residues(
     plt.close(fig)
 
 
+def plot_zn_violin(single_data: Dict[str, np.ndarray], cluster_data: Dict[str, np.ndarray], reference: str, out_svg: Path) -> None:
+    if not single_data and not cluster_data:
+        return
+    try:
+        import seaborn as sns
+    except ImportError:
+        print("[WARN] seaborn not installed, skipping Zn violin plot")
+        return
+
+    import pandas as pd
+    systems = sorted(list(set(list(single_data.keys()) + list(cluster_data.keys()))))
+    ordered = [reference] + [s for s in systems if s != reference] if reference in systems else systems
+
+    rows = []
+    for sys in ordered:
+        if sys in single_data:
+            for val in single_data[sys]:
+                rows.append({"System": sys.upper(), "Distance (Å)": val, "Site": "Single (Zn221)"})
+        if sys in cluster_data:
+            for val in cluster_data[sys]:
+                rows.append({"System": sys.upper(), "Distance (Å)": val, "Site": "Cluster (Zn222/Zn223)"})
+
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Cambria", "Times New Roman", "DejaVu Serif"],
+            "font.size": 14.0,
+            "axes.labelsize": 16.0,
+            "xtick.labelsize": 14.0,
+            "ytick.labelsize": 14.0,
+            "axes.grid": False,
+            "xtick.direction": "out",
+            "ytick.direction": "out",
+            "xtick.top": False,
+            "ytick.right": False,
+            "svg.fonttype": "none",
+        }
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
+    sns.violinplot(
+        data=df, x="System", y="Distance (Å)", hue="Site",
+        inner="quart", ax=ax, palette={"Single (Zn221)": "#4A6B82", "Cluster (Zn222/Zn223)": "#B85A4B"},
+        linewidth=1.0, dodge=True, cut=0
+    )
+
+    ax.set_title("Zn Coordination Distance Distribution (Last 50 ns)", fontsize=18, fontweight="bold", pad=12)
+    ax.set_xlabel("System", fontsize=16, fontweight="bold")
+    ax.set_ylabel("Distance (Å)", fontsize=16, fontweight="bold")
+    
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=14)
+
+    y_min = max(0, df["Distance (Å)"].min() - 0.1)
+    y_max = df["Distance (Å)"].max() + 0.1
+    ax.set_ylim(y_min, y_max)
+
+    ax.legend(title="Coordination Site", frameon=True, edgecolor="black", loc="upper right", fontsize=13, title_fontsize=14)
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+        spine.set_color("black")
+
+    out_svg.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_svg, format="svg", bbox_inches="tight")
+    plt.close(fig)
+
+    # --- Generate Horizontal Version ---
+    out_svg_h = out_svg.parent / f"{out_svg.stem}_horizontal{out_svg.suffix}"
+    fig_h, ax_h = plt.subplots(figsize=(7.0, max(5.5, len(ordered) * 0.6)), constrained_layout=True)
+    
+    sns.violinplot(
+        data=df, x="Distance (Å)", y="System", hue="Site",
+        inner="quart", ax=ax_h, palette={"Single (Zn221)": "#4A6B82", "Cluster (Zn222/Zn223)": "#B85A4B"},
+        linewidth=1.0, dodge=True, orient="h", cut=0
+    )
+
+    ax_h.set_title("Zn Coordination Distance Distribution (Last 50 ns)", fontsize=18, fontweight="bold", pad=12)
+    ax_h.set_ylabel("System", fontsize=16, fontweight="bold")
+    ax_h.set_xlabel("Distance (Å)", fontsize=16, fontweight="bold")
+    
+    plt.setp(ax_h.get_yticklabels(), fontsize=14)
+    plt.setp(ax_h.get_xticklabels(), fontsize=14)
+
+    ax_h.set_xlim(y_min, y_max)
+
+    ax_h.legend(title="Coordination Site", frameon=True, edgecolor="black", loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=13, title_fontsize=14)
+
+    for spine in ax_h.spines.values():
+        spine.set_linewidth(1.2)
+        spine.set_color("black")
+
+    fig_h.savefig(out_svg_h, format="svg", bbox_inches="tight")
+    plt.close(fig_h)
+
+def plot_zn_distances_single_system(zn_files: List[Path], out_svg: Path, dt: float, ntwx: int, stride: int, system_name: str) -> None:
+    if not zn_files:
+        return
+    
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Cambria", "Times New Roman", "DejaVu Serif"],
+        "font.size": 12.0,
+        "axes.labelsize": 14.0,
+        "xtick.labelsize": 12.0,
+        "ytick.labelsize": 12.0,
+        "axes.grid": False,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "xtick.top": False,
+        "ytick.right": False,
+        "svg.fonttype": "none",
+    })
+
+    colors = {
+        "ZN221_CYM161_ZN_SG.dat": "#2c3e50", "ZN221_CYM208_ZN_SG.dat": "#e74c3c",
+        "ZN221_CYM210_ZN_SG.dat": "#27ae60", "ZN221_CYM215_ZN_SG.dat": "#f39c12",
+        "ZN222_CYM33_ZN_SG.dat": "#2980b9", "ZN222_CYM35_ZN_SG.dat": "#8e44ad",
+        "ZN222_CYM43_ZN_SG.dat": "#c0392b", "ZN222_CYM49_ZN_SG.dat": "#16a085",
+        "ZN223_CYM43_ZN_SG.dat": "#d35400", "ZN223_CYM58_ZN_SG.dat": "#7f8c8d",
+        "ZN223_CYM63_ZN_SG.dat": "#2c3e50", "ZN223_CYM69_ZN_SG.dat": "#bdc3c7"
+    }
+
+    group1 = [f for f in zn_files if "ZN221" in f.name]
+    group2 = [f for f in zn_files if "ZN222" in f.name]
+    group3 = [f for f in zn_files if "ZN223" in f.name]
+
+    if not group1 and not group2 and not group3:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True, constrained_layout=True)
+
+    def plot_zn_group(ax, data_paths, title):
+        all_dist = []
+        for path in data_paths:
+            data = read_table(path)
+            if data is None or data.shape[1] < 2:
+                continue
+            time = (data[:, 0].astype(float) * ntwx * stride * dt) / 1000.0
+            dist = data[:, 1].astype(float)
+            mask = np.isfinite(time) & np.isfinite(dist)
+            time = time[mask]
+            dist = dist[mask]
+            if dist.size:
+                all_dist.append(dist)
+            
+            label = path.stem.replace("ZN", "Zn").replace("_ZN_SG", "")
+            color = colors.get(path.name, '#7f8c8d')
+            
+            ax.plot(time, dist, lw=0.3, color=color, alpha=0.2)
+            
+            window = max(1, len(dist) // 50)
+            if window > 1:
+                dist_smooth = np.convolve(dist, np.ones(window), 'valid') / window
+                time_smooth = time[window-1:]
+                ax.plot(time_smooth, dist_smooth, lw=1.5, color=color, label=label)
+            else:
+                ax.plot(time, dist, lw=1.5, color=color, label=label)
+
+        ax.set_title(title, loc='left', fontsize=12, fontweight='bold')
+        ax.set_ylabel("Distance (Å)", fontsize=13)
+        if all_dist:
+            y = np.concatenate(all_dist)
+            if y.size > 0:
+                y_min = float(np.min(y))
+                y_max = float(np.max(y))
+                span = max(y_max - y_min, 0.15)
+                low = max(0, y_min - 0.1 * span)
+                high = y_max + 0.1 * span
+                ax.set_ylim(low, high)
+        
+        ax.margins(x=0)
+        if data_paths:
+            ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=10, frameon=True, edgecolor='black')
+
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.2)
+            spine.set_color("black")
+            
+        ax.tick_params(direction="out", length=4, width=1.2, top=False, right=False)
+
+    plot_zn_group(ax1, group1, f"A: Zn221 Coordination (Single Site) - {system_name.upper()}")
+    plot_zn_group(ax2, group2 + group3, f"B: Zn222 & Zn223 Cluster (Shared Site) - {system_name.upper()}")
+
+    ax2.set_xlabel("Time (ns)", fontsize=13)
+    
+    out_svg.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_svg, format="svg", bbox_inches='tight')
+    plt.close(fig)
+
+
 def safe_copy(src: Path, dst_dir: Path) -> None:
     if src.exists():
         dst_dir.mkdir(parents=True, exist_ok=True)
@@ -836,6 +1102,8 @@ def main() -> None:
     ap.add_argument("--ntwx", type=int, default=5000)
     ap.add_argument("--stride", type=int, default=10)
     ap.add_argument("--reference", type=str, default="a1a0m", help="Reference system highlighted in light gray.")
+    ap.add_argument("--grid-legend-no-box", action="store_true", help="Remove box from system labels in 3x3 grid plots.")
+    ap.add_argument("--plot-zn-violin", action="store_true", help="Generate violin plot comparing Zn coordination distances.")
     args = ap.parse_args()
 
     if args.command == "check":
@@ -902,6 +1170,8 @@ def main() -> None:
     per_system_summary: Dict[str, List[Dict[str, object]]] = {}
     per_system_ts: Dict[str, List[Dict[str, object]]] = {}
     per_system_metric_file: Dict[str, Dict[str, Path]] = {}
+    per_system_zn_single: Dict[str, np.ndarray] = {}
+    per_system_zn_cluster: Dict[str, np.ndarray] = {}
 
     run_dirs = sorted([p for p in runs_root.iterdir() if p.is_dir()])
     all_systems = [p.name for p in run_dirs]
@@ -1019,29 +1289,65 @@ def main() -> None:
         else:
             print("  - missing/unparsed FINAL_GBSA.dat")
 
+        # Process ZN files for the last 50ns
+        zn_files = sorted(analysis_dir.glob("ZN*.dat"))
+        if zn_files:
+            print(f"  - ZN distances: found {len(zn_files)} files, adding to key_results")
+            zn_means_for_overall = []
+            single_raw = []
+            cluster_raw = []
+            for zn_file in zn_files:
+                zn_stats = extract_zn_last_50ns_stats(zn_file, args.dt, args.ntwx, stride=1)
+                if zn_stats is not None:
+                    mean_val, std_val = zn_stats
+                    key_row[f"{zn_file.stem}_last50ns_mean"] = mean_val
+                    key_row[f"{zn_file.stem}_last50ns_std"] = std_val
+                    zn_means_for_overall.append(mean_val)
+
+                if args.plot_zn_violin:
+                    raw_data = extract_zn_last_50ns_raw(zn_file, args.dt, args.ntwx, stride=1)
+                    if raw_data is not None:
+                        if "ZN221" in zn_file.name:
+                            single_raw.append(raw_data)
+                        elif "ZN222" in zn_file.name or "ZN223" in zn_file.name:
+                            cluster_raw.append(raw_data)
+
+            if zn_means_for_overall:
+                key_row["ZN_overall_last50ns_mean"] = float(np.mean(zn_means_for_overall))
+                key_row["ZN_overall_last50ns_std"] = float(np.std(zn_means_for_overall, ddof=1) if len(zn_means_for_overall) > 1 else 0.0)
+
+            if args.plot_zn_violin:
+                if single_raw:
+                    per_system_zn_single[sys_name] = np.concatenate(single_raw)
+                if cluster_raw:
+                    per_system_zn_cluster[sys_name] = np.concatenate(cluster_raw)
+
         key_rows.append(key_row)
 
     plot_multi("02 Cα RMSD", "Cα RMSD (Å)", metrics["02_Calpha_RMSD"], outdir / "02_Calpha_RMSD_multi.svg", args.reference)
-    plot_multi_grid("02 Cα RMSD", "Cα RMSD (Å)", metrics["02_Calpha_RMSD"], outdir / "02_Calpha_RMSD_grid_3x3.svg", args.reference)
+    plot_multi_grid("02 Cα RMSD", "Cα RMSD (Å)", metrics["02_Calpha_RMSD"], outdir / "02_Calpha_RMSD_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
     plot_multi("02 RMSF Profile", "RMSF (Å)", rmsf_profiles, outdir / "02_RMSF_multi.svg", args.reference, xlabel="Residue Index")
-    plot_multi_grid("02 RMSF Profile", "RMSF (Å)", rmsf_profiles, outdir / "02_RMSF_grid_3x3.svg", args.reference, xlabel="Residue Index")
+    plot_multi_grid("02 RMSF Profile", "RMSF (Å)", rmsf_profiles, outdir / "02_RMSF_grid_3x3.svg", args.reference, xlabel="Residue Index", grid_legend_no_box=args.grid_legend_no_box)
     
     plot_multi("03 Ligand RMSD", "Ligand RMSD (Å)", metrics["03_Ligand_RMSD"], outdir / "03_Ligand_RMSD_multi.svg", args.reference)
-    plot_multi_grid("03 Ligand RMSD", "Ligand RMSD (Å)", metrics["03_Ligand_RMSD"], outdir / "03_Ligand_RMSD_grid_3x3.svg", args.reference)
+    plot_multi_grid("03 Ligand RMSD", "Ligand RMSD (Å)", metrics["03_Ligand_RMSD"], outdir / "03_Ligand_RMSD_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
     plot_multi("06 Radius of Gyration", "RoG (Å)", metrics["06_RoG"], outdir / "06_RoG_multi.svg", args.reference)
-    plot_multi_grid("06 Radius of Gyration", "RoG (Å)", metrics["06_RoG"], outdir / "06_RoG_grid_3x3.svg", args.reference)
+    plot_multi_grid("06 Radius of Gyration", "RoG (Å)", metrics["06_RoG"], outdir / "06_RoG_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
     plot_multi("07 Protein SASA", "Protein SASA (Å²)", metrics["07_SASA_protein"], outdir / "07_SASA_protein_multi.svg", args.reference)
-    plot_multi_grid("07 Protein SASA", "Protein SASA (Å²)", metrics["07_SASA_protein"], outdir / "07_SASA_protein_grid_3x3.svg", args.reference)
+    plot_multi_grid("07 Protein SASA", "Protein SASA (Å²)", metrics["07_SASA_protein"], outdir / "07_SASA_protein_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
     plot_multi("07 Ligand SASA", "Ligand SASA (Å²)", metrics["07_SASA_ligand"], outdir / "07_SASA_ligand_multi.svg", args.reference)
-    plot_multi_grid("07 Ligand SASA", "Ligand SASA (Å²)", metrics["07_SASA_ligand"], outdir / "07_SASA_ligand_grid_3x3.svg", args.reference)
+    plot_multi_grid("07 Ligand SASA", "Ligand SASA (Å²)", metrics["07_SASA_ligand"], outdir / "07_SASA_ligand_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
     plot_multi("09 Protein-Ligand H-Bonds", "Number of Hydrogen Bonds", metrics["09_HBond_total"], outdir / "09_HBond_total_multi.svg", args.reference)
     plot_hbond_faceted(metrics["09_HBond_total"], outdir / "09_HBond_total_faceted.svg", args.reference)
-    plot_pca_cartoon_grid(run_dirs, outdir / "16_PCA_Mode_Cartoon_Transition_grid_3x3.svg", args.reference, nrows=3, ncols=3)
+    plot_pca_cartoon_grid(run_dirs, outdir / "16_PCA_Mode_Cartoon_Transition_grid_3x3.svg", args.reference, nrows=3, ncols=3, grid_legend_no_box=args.grid_legend_no_box)
+
+    if args.plot_zn_violin:
+        plot_zn_violin(per_system_zn_single, per_system_zn_cluster, args.reference, outdir / "00_Zn_Coordination_Violin.svg")
 
     if summary_rows:
         pd.DataFrame(summary_rows).to_csv(outdir / "md_summary_all_systems.csv", index=False)
@@ -1123,12 +1429,18 @@ def main() -> None:
         for fp in copy_list:
             safe_copy(fp, data_dir)
 
+        # Copy Zn coordination analysis results
+        copy_glob(analysis_dir, patterns=["ZN*"], dst_dir=data_dir)
+        
+        # Plot Zn distances for this system
+        sys_zn_files = sorted(analysis_dir.glob("ZN*.dat"))
+        plot_zn_distances_single_system(sys_zn_files, plots_dir / "00_Zn_Coordination_Stability.svg", args.dt, args.ntwx, args.stride, sys_name)
+
         # Copy publication-grade plots produced in each system's analysis/plots.
         sys_analysis_plots = analysis_dir / "plots"
         copy_glob(
             sys_analysis_plots,
             patterns=[
-                "00_Zn_Coordination_Stability.svg",
                 "14_PCA_variance_contribution.svg",
                 "14_PCA_PC1_PC2_timecolored.svg",
                 "16_FEL_PC1_PC2_contour.svg",
@@ -1144,6 +1456,8 @@ def main() -> None:
     print(f"  - Output dir: {outdir}")
     print("  - SVG: 02/03/06/07/09 multi-system plots (including RMSF) + grid_3x3 plots + 09_HBond_total_faceted.svg")
     print("  - SVG: 16_PCA_Mode_Cartoon_Transition_grid_3x3.svg")
+    if args.plot_zn_violin:
+        print("  - SVG: 00_Zn_Coordination_Violin.svg (and _horizontal.svg)")
     print("  - CSV: md_summary_all_systems.csv, md_timeseries_long.csv, md_key_results_last50ns.csv")
     print("  - CSV: final_gbsa_summary_all_systems.csv (from FINAL_GBSA.dat)")
     print("  - Per-system: systems/<system>/{plots,data,summary.csv,timeseries.csv}")
