@@ -35,7 +35,7 @@ import pandas as pd
 import seaborn as sns
 from matplotlib import rcParams
 from matplotlib.patches import Circle, Patch
-from sklearn.metrics import auc, precision_recall_curve, roc_curve
+from sklearn.metrics import auc, precision_recall_curve, roc_curve, average_precision_score, roc_auc_score
 
 
 # %%
@@ -63,6 +63,7 @@ METRIC_LABELS = {
 BOXPLOT_ALLOWED_METRICS = {"mcc", "f1", "accuracy", "precision", "recall"}
 POLAR_METRIC_ORDER = ["mcc", "f1", "accuracy", "precision", "recall"]
 CI_Z = 1.96
+LEGEND_DECIMALS = 3
 MODEL_COLORS = {
     'ETC': '#B08B86',   # 莫兰迪肉粉/浅褐
     'RFC': '#C3B083',   # 暗金/莫兰迪淡黄
@@ -179,8 +180,9 @@ def error_from_samples(samples: List[np.ndarray], error_type: str = "ci95") -> n
     if arr.shape[0] <= 1:
         return np.zeros(arr.shape[1], dtype=float)
     if error_type == "std":
+        # Match pipeline CSV summaries which use population std (ddof=0).
         return np.std(arr, axis=0, ddof=0)
-    sem = np.std(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
+    sem = np.std(arr, axis=0, ddof=0) / np.sqrt(arr.shape[0])
     return CI_Z * sem
 
 
@@ -189,8 +191,9 @@ def error_from_scalars(values: List[float], error_type: str = "ci95") -> float:
     if arr.size <= 1:
         return 0.0
     if error_type == "std":
+        # Match pipeline CSV summaries which use population std (ddof=0).
         return float(np.std(arr, ddof=0))
-    sem = np.std(arr, ddof=1) / np.sqrt(arr.size)
+    sem = np.std(arr, ddof=0) / np.sqrt(arr.size)
     return float(CI_Z * sem)
 
 
@@ -208,7 +211,109 @@ def get_or_assign_model_colors(models: List[str], palette_name: str, color_map: 
                 next_idx += 1
 
 
-def prepare_curves(prediction_files: List[Path]) -> tuple[Dict[str, Dict[str, List[np.ndarray]]], float]:
+def _extract_split_seed(path: Path) -> Optional[str]:
+    for part in path.parts:
+        if part.startswith("split_seed_"):
+            return part
+    return None
+
+
+def load_rocpr_summary_stats(base_dir: Path, stage: str) -> Dict[str, Dict[str, float]]:
+    """Load ROC-AUC / PR-AUC mean+std for legend display.
+
+    External stage uses the global aggregated CSV (one value per split_seed, summarized across seeds).
+    CV stage intentionally summarizes across split_seeds (not across folds), matching the paper-style
+    statement "mean±std across seeds".
+    """
+    stats: Dict[str, Dict[str, float]] = {}
+    results_dir = base_dir / "results"
+    if stage == "external":
+        path = results_dir / "all_seed_external_summary.csv"
+        if not path.exists():
+            return stats
+        df = pd.read_csv(path)
+        needed = {"model", "roc_auc_mean", "roc_auc_std", "pr_auc_mean", "pr_auc_std"}
+        if not needed.issubset(df.columns):
+            return stats
+        for _, row in df.iterrows():
+            model = str(row["model"])
+            stats[model] = {
+                "roc_auc_mean": float(row["roc_auc_mean"]),
+                "roc_auc_std": float(row["roc_auc_std"]),
+                "pr_auc_mean": float(row["pr_auc_mean"]),
+                "pr_auc_std": float(row["pr_auc_std"]),
+            }
+        return stats
+
+    if stage == "cv":
+        # Prefer the explicit across-seed summary produced by step11_training_summary.py if available.
+        # This is the most unambiguous "across split_seed" definition and matches the user's tables.
+        across_path = results_dir / "all_seed_cv_summary_across_seeds.csv"
+        if across_path.exists():
+            try:
+                df = pd.read_csv(across_path)
+            except Exception:
+                df = None
+            if df is not None and {"model", "metric", "mean", "std"}.issubset(df.columns):
+                df["metric"] = df["metric"].astype(str).str.strip().str.lower()
+                for model, group in df.groupby("model"):
+                    model_stats: Dict[str, float] = {}
+                    for _, row in group.iterrows():
+                        metric = str(row["metric"])
+                        if metric in ("roc_auc", "pr_auc"):
+                            if pd.isna(row.get("mean")) or pd.isna(row.get("std")):
+                                continue
+                            model_stats[f"{metric}_mean"] = float(row["mean"])
+                            model_stats[f"{metric}_std"] = float(row["std"])
+                    if model_stats:
+                        stats[str(model)] = model_stats
+                return stats
+
+        # Cross-seed summary for CV: for each split_seed, read cv_summary.csv (mean over folds),
+        # then compute mean/std across split_seeds. This avoids mixing fold-to-fold variation
+        # into the "across seeds" error bars shown in legends.
+        per_model: Dict[str, Dict[str, List[float]]] = {}
+        for split_dir in split_seed_dirs(base_dir):
+            path = split_dir / "results" / "cv_summary.csv"
+            if not path.exists():
+                continue
+            try:
+                df = pd.read_csv(path)
+            except Exception:
+                continue
+            needed = {"model", "metric", "mean"}
+            if not needed.issubset(df.columns):
+                continue
+            df["metric"] = df["metric"].astype(str).str.strip().str.lower()
+            for _, row in df.iterrows():
+                metric = str(row["metric"])
+                if metric not in ("roc_auc", "pr_auc"):
+                    continue
+                val = row.get("mean")
+                if pd.isna(val):
+                    continue
+                model = str(row["model"])
+                per_model.setdefault(model, {"roc_auc": [], "pr_auc": []})
+                per_model[model][metric].append(float(val))
+
+        for model, buckets in per_model.items():
+            model_stats: Dict[str, float] = {}
+            for metric in ("roc_auc", "pr_auc"):
+                values = buckets.get(metric, [])
+                if not values:
+                    continue
+                arr = np.asarray(values, dtype=float)
+                model_stats[f"{metric}_mean"] = float(np.mean(arr))
+                # Match seed_cv_metrics_summary.csv (pandas std default ddof=1, i.e. sample std).
+                model_stats[f"{metric}_std"] = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
+            if model_stats:
+                stats[model] = model_stats
+        return stats
+
+    return stats
+
+
+def prepare_curves(prediction_files: List[Path], stage: str) -> tuple[Dict[str, Dict[str, List[np.ndarray]]], float]:
     curves: Dict[str, Dict[str, List[np.ndarray]]] = {}
     fpr_grid = np.linspace(0.0, 1.0, 400)
     recall_grid = np.linspace(0.0, 1.0, 400)
@@ -232,30 +337,70 @@ def prepare_curves(prediction_files: List[Path]) -> tuple[Dict[str, Dict[str, Li
             return
         fpr, tpr, _ = roc_curve(y_true, scores)
         precision, recall, _ = precision_recall_curve(y_true, scores)
-        entry = curves.setdefault(model_name, {"roc": [], "pr": []})
+        
+        exact_roc_auc = roc_auc_score(y_true, scores)
+        exact_pr_auc = average_precision_score(y_true, scores)
+        
+        entry = curves.setdefault(model_name, {"roc": [], "pr": [], "exact_roc_auc": [], "exact_pr_auc": []})
         entry["roc"].append(interpolate_curve(fpr, tpr, fpr_grid))
         entry.setdefault("roc_grid", fpr_grid)
         entry["pr"].append(interpolate_curve(recall[::-1], precision[::-1], recall_grid))
         entry.setdefault("pr_grid", recall_grid)
+        entry["exact_roc_auc"].append(exact_roc_auc)
+        entry["exact_pr_auc"].append(exact_pr_auc)
         pooled_y_true.append(y_true.astype(float))
 
-    for path in prediction_files:
-        try:
-            df = pd.read_csv(path)
-        except Exception as exc:
-            print(f"[WARN] Failed to read {path}: {exc}")
-            continue
-        required = {"y_true", "y_prob", "model"}
-        if not required.issubset(df.columns):
-            print(f"[WARN] Missing required columns in {path}. Required: {sorted(required)}")
-            continue
-        for model_name, group in df.groupby("model"):
-            y_true = pd.to_numeric(group["y_true"], errors="coerce").to_numpy()
-            scores = pd.to_numeric(group["y_prob"], errors="coerce").to_numpy()
-            if np.all(np.isnan(y_true)):
-                print(f"[WARN] y_true is empty/NaN for model '{model_name}' in {path}")
+    required = {"y_true", "y_prob", "model"}
+    if stage == "cv":
+        # For CV, aggregate folds within each split_seed_* first.
+        # This matches the pipeline summaries (one metric value per seed), so std aligns with CSV.
+        by_seed: Dict[str, List[Path]] = {}
+        for path in prediction_files:
+            seed_dir = _extract_split_seed(path)
+            if not seed_dir:
+                print(f"[WARN] Could not infer split_seed_* from {path}; skipped.")
                 continue
-            record_curve(str(model_name), y_true, scores, path)
+            by_seed.setdefault(seed_dir, []).append(path)
+
+        for seed_dir, paths in sorted(by_seed.items()):
+            dfs = []
+            for path in sorted(paths):
+                try:
+                    df = pd.read_csv(path)
+                except Exception as exc:
+                    print(f"[WARN] Failed to read {path}: {exc}")
+                    continue
+                if not required.issubset(df.columns):
+                    print(f"[WARN] Missing required columns in {path}. Required: {sorted(required)}")
+                    continue
+                dfs.append(df)
+            if not dfs:
+                continue
+            merged = pd.concat(dfs, ignore_index=True)
+            for model_name, group in merged.groupby("model"):
+                y_true = pd.to_numeric(group["y_true"], errors="coerce").to_numpy()
+                scores = pd.to_numeric(group["y_prob"], errors="coerce").to_numpy()
+                if np.all(np.isnan(y_true)):
+                    print(f"[WARN] y_true is empty/NaN for model '{model_name}' in {seed_dir}")
+                    continue
+                record_curve(str(model_name), y_true, scores, Path(seed_dir))
+    else:
+        for path in prediction_files:
+            try:
+                df = pd.read_csv(path)
+            except Exception as exc:
+                print(f"[WARN] Failed to read {path}: {exc}")
+                continue
+            if not required.issubset(df.columns):
+                print(f"[WARN] Missing required columns in {path}. Required: {sorted(required)}")
+                continue
+            for model_name, group in df.groupby("model"):
+                y_true = pd.to_numeric(group["y_true"], errors="coerce").to_numpy()
+                scores = pd.to_numeric(group["y_prob"], errors="coerce").to_numpy()
+                if np.all(np.isnan(y_true)):
+                    print(f"[WARN] y_true is empty/NaN for model '{model_name}' in {path}")
+                    continue
+                record_curve(str(model_name), y_true, scores, path)
     prevalence = float(np.mean(np.concatenate(pooled_y_true))) if pooled_y_true else 0.0
     return curves, prevalence
 
@@ -269,7 +414,8 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
                 dpi: int,
                 font: str,
                 global_color_map: Dict[str, tuple],
-                error_type: str = "ci95") -> None:
+                error_type: str = "ci95",
+                summary_stats: Optional[Dict[str, Dict[str, float]]] = None) -> None:
     if not curves:
         return
     configure_plotting(font)
@@ -287,8 +433,13 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         err_tpr = error_from_samples(data["roc"], error_type)
         mean_prec = np.mean(data["pr"], axis=0)
         err_prec = error_from_samples(data["pr"], error_type)
-        roc_auc_vals = [auc(fpr_grid, arr) for arr in data["roc"]]
-        pr_auc_vals = [auc(recall_grid, arr) for arr in data["pr"]]
+        roc_auc_vals = data.get("exact_roc_auc", [auc(fpr_grid, arr) for arr in data["roc"]])
+        pr_auc_vals = data.get("exact_pr_auc", [auc(recall_grid, arr) for arr in data["pr"]])
+        # If requested, force legend mean/std to match pipeline CSV exactly.
+        if summary_stats and error_type == "std":
+            model_stat = summary_stats.get(str(model))
+        else:
+            model_stat = None
         model_entries.append({
             "model": model,
             "fpr_grid": fpr_grid,
@@ -297,10 +448,10 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
             "err_tpr": err_tpr,
             "mean_prec": mean_prec,
             "err_prec": err_prec,
-            "roc_auc_mean": float(np.mean(roc_auc_vals)),
-            "roc_auc_err": error_from_scalars(roc_auc_vals, error_type),
-            "pr_auc_mean": float(np.mean(pr_auc_vals)),
-            "pr_auc_err": error_from_scalars(pr_auc_vals, error_type),
+            "roc_auc_mean": float(model_stat["roc_auc_mean"]) if model_stat and "roc_auc_mean" in model_stat else float(np.mean(roc_auc_vals)),
+            "roc_auc_err": float(model_stat["roc_auc_std"]) if model_stat and "roc_auc_std" in model_stat else error_from_scalars(roc_auc_vals, error_type),
+            "pr_auc_mean": float(model_stat["pr_auc_mean"]) if model_stat and "pr_auc_mean" in model_stat else float(np.mean(pr_auc_vals)),
+            "pr_auc_err": float(model_stat["pr_auc_std"]) if model_stat and "pr_auc_std" in model_stat else error_from_scalars(pr_auc_vals, error_type),
         })
 
     roc_sorted = sorted(
@@ -324,7 +475,8 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         axes[0].plot(
             fpr_grid,
             mean_tpr,
-            label=f"{model} (ROC-AUC={entry['roc_auc_mean']:.3f}±{entry['roc_auc_err']:.3f})",
+            label=(f"{model} (ROC-AUC={entry['roc_auc_mean']:.{LEGEND_DECIMALS}f}"
+                   f"±{entry['roc_auc_err']:.{LEGEND_DECIMALS}f})"),
             linewidth=1.5,
             color=color,
         )
@@ -346,7 +498,8 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         axes[1].plot(
             recall_grid,
             mean_prec,
-            label=f"{model} (PR-AUC={entry['pr_auc_mean']:.3f}±{entry['pr_auc_err']:.3f})",
+            label=(f"{model} (PR-AUC={entry['pr_auc_mean']:.{LEGEND_DECIMALS}f}"
+                   f"±{entry['pr_auc_err']:.{LEGEND_DECIMALS}f})"),
             linewidth=1.5,
             color=color,
         )
@@ -364,7 +517,7 @@ def plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
         linestyle="--",
         linewidth=1.0,
         color="gray",
-        label=f"Positive-Rate Baseline ({prevalence:.3f})",
+        label=f"Positive-Rate Baseline ({prevalence:.{LEGEND_DECIMALS}f})",
     )
     stage_titles = {
         "cv": "Cross-Validation",
@@ -813,12 +966,24 @@ def main() -> None:
         if not prediction_files:
             print(f"[WARN] No prediction files found for stage '{stage}'.")
             continue
-        curves, prevalence = prepare_curves(prediction_files)
+        curves, prevalence = prepare_curves(prediction_files, stage)
         if not curves:
             print(f"[WARN] Could not build curves for stage '{stage}'.")
             continue
+        summary_stats = load_rocpr_summary_stats(base_dir, stage)
         rocpr_path = output_dir / f"{stage}_roc_pr.svg"
-        plot_roc_pr(curves, prevalence, rocpr_path, stage, args.palette, args.dpi, args.font, global_color_map, args.error_type)
+        plot_roc_pr(
+            curves,
+            prevalence,
+            rocpr_path,
+            stage,
+            args.palette,
+            args.dpi,
+            args.font,
+            global_color_map,
+            args.error_type,
+            summary_stats=summary_stats,
+        )
         print(f"[OK] Saved {stage} ROC/PR: {rocpr_path}")
 
     boxplot_stages: List[str] = []

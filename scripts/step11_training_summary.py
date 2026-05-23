@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
+import statistics
 
 
 def setup_logger() -> logging.Logger:
@@ -303,9 +304,40 @@ Examples:
         help="Output CSV file path. If not specified, saves to run_dir/results/seed_metrics_summary.csv"
     )
     parser.add_argument(
+        "--write-across-seed-summary",
+        action="store_true",
+        default=True,
+        help="Also write a long-form across-seed summary CSV (model,metric,mean,std,n,ddof) to run_dir/results/",
+    )
+    parser.add_argument(
+        "--no-write-across-seed-summary",
+        action="store_false",
+        dest="write_across_seed_summary",
+        help="Disable writing the extra across-seed summary CSV.",
+    )
+    parser.add_argument(
+        "--across-seed-ddof",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="ddof for across-seed std in the extra summary CSV (default: 1, sample std).",
+    )
+    parser.add_argument(
+        "--write-final-tables",
+        action="store_true",
+        default=True,
+        help="Also write manuscript-ready tables (mean ± std, 3 decimals) for CV and External to run_dir/results/final_table/.",
+    )
+    parser.add_argument(
+        "--no-write-final-tables",
+        action="store_false",
+        dest="write_final_tables",
+        help="Disable writing manuscript-ready tables to run_dir/results/final_table/.",
+    )
+    parser.add_argument(
         "--metrics",
         type=str,
-        default="mcc,f1,accuracy,precision,recall,roc_auc",
+        default="mcc,roc_auc,pr_auc,accuracy,precision,recall,f1",
         help="Comma-separated list of metrics to include (default: mcc,f1,accuracy,precision,recall,roc_auc)"
     )
     parser.add_argument(
@@ -429,6 +461,120 @@ Examples:
         # Save to CSV
         summary_df.to_csv(output_path)
         logger.info(f"\n✓ Summary saved to: {output_path}")
+
+        if args.write_across_seed_summary:
+            rows = []
+            seed_ids = sorted(aggregated.keys())
+            for model in final_models:
+                for metric in available_metrics:
+                    values = []
+                    for seed in seed_ids:
+                        v = aggregated.get(seed, {}).get(model, {}).get(metric)
+                        if v is None:
+                            continue
+                        try:
+                            fv = float(v)
+                        except Exception:
+                            continue
+                        if np.isnan(fv):
+                            continue
+                        values.append(fv)
+                    n = len(values)
+                    if n == 0:
+                        mean_val = None
+                        std_val = None
+                    else:
+                        mean_val = float(statistics.fmean(values))
+                        if n <= 1:
+                            std_val = 0.0
+                        else:
+                            std_val = float(statistics.pstdev(values) if args.across_seed_ddof == 0 else statistics.stdev(values))
+                    rows.append({
+                        "model": model,
+                        "metric": metric,
+                        "mean": mean_val,
+                        "std": std_val,
+                        "n": n,
+                        "ddof": args.across_seed_ddof,
+                    })
+
+            across_df = pd.DataFrame(rows)
+            across_name = (
+                "all_seed_cv_summary_across_seeds.csv"
+                if args.stage == "cv"
+                else "all_seed_external_summary_across_seeds.csv"
+            )
+            across_path = args.run_dir / "results" / across_name
+            across_path.parent.mkdir(parents=True, exist_ok=True)
+            across_df.to_csv(across_path, index=False)
+            logger.info(f"✓ Across-seed summary saved to: {across_path}")
+
+        if args.write_final_tables:
+            def fmt_cell(mean_val, std_val) -> str:
+                if mean_val is None or std_val is None:
+                    return ""
+                try:
+                    if (isinstance(mean_val, float) and np.isnan(mean_val)) or (isinstance(std_val, float) and np.isnan(std_val)):
+                        return ""
+                except Exception:
+                    pass
+                return f"{float(mean_val):.3f} ± {float(std_val):.3f}"
+
+            def build_final_table(stage: str) -> pd.DataFrame:
+                aggregated2, all_models2, all_metrics2 = aggregate_metrics(args.run_dir, stage=stage)
+                models2 = all_models2
+                if requested_models:
+                    models2 = [m for m in requested_models if m in all_models2] or all_models2
+                metrics2 = [m for m in requested_metrics if m in all_metrics2] or all_metrics2
+
+                seed_ids = sorted(aggregated2.keys())
+                rows = []
+                for model in models2:
+                    row = {"model": model}
+                    for metric in metrics2:
+                        values = []
+                        for seed in seed_ids:
+                            v = aggregated2.get(seed, {}).get(model, {}).get(metric)
+                            if v is None:
+                                continue
+                            try:
+                                fv = float(v)
+                            except Exception:
+                                continue
+                            if np.isnan(fv):
+                                continue
+                            values.append(fv)
+                        if not values:
+                            row[metric] = ""
+                            continue
+                        mean_val = float(statistics.fmean(values))
+                        if len(values) <= 1:
+                            std_val = 0.0
+                        else:
+                            std_val = float(
+                                statistics.pstdev(values)
+                                if args.across_seed_ddof == 0
+                                else statistics.stdev(values)
+                            )
+                        row[metric] = fmt_cell(mean_val, std_val)
+                    rows.append(row)
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    # Keep "model" first, then metrics order
+                    col_order = ["model"] + [m for m in metrics2 if m in df.columns]
+                    df = df[col_order]
+                return df
+
+            final_dir = args.run_dir / "results" / "final_table"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            cv_table = build_final_table("cv")
+            ext_table = build_final_table("external")
+            cv_path = final_dir / "final_table_cv_mean_std.csv"
+            ext_path = final_dir / "final_table_external_mean_std.csv"
+            cv_table.to_csv(cv_path, index=False)
+            ext_table.to_csv(ext_path, index=False)
+            logger.info(f"✓ Final table (CV) saved to: {cv_path}")
+            logger.info(f"✓ Final table (External) saved to: {ext_path}")
         
         # Print summary
         logger.info(f"\nSummary Table:")

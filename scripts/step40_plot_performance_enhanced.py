@@ -69,6 +69,7 @@ METRIC_LABELS = {
 }
 
 CI_Z = 1.96
+LEGEND_DECIMALS = 3
 MODEL_COLORS = {
     'ETC': '#B08B86',   # Morandi pink/light brown
     'RFC': '#C3B083',   # Dark gold/Morandi light yellow
@@ -284,40 +285,52 @@ def aggregate_metrics_by_model(
     sub_df = metric_df[metric_df["metric"] == metric_name].copy()
     if sub_df.empty: return pd.DataFrame()
     
-    use_global_std = (error_type == "std")
+    # Use explicit summary CSVs when available to keep plotted mean/std identical to tables.
     global_df = None
-    if use_global_std:
-        global_path = base_dir / "results" / (
-            "all_seed_cv_summary.csv" if stage == "cv" else "all_seed_external_summary.csv"
-        )
-        if global_path.exists():
-            global_df = pd.read_csv(global_path)
+    global_mode = None
+    if error_type == "std":
+        if stage == "cv":
+            cv_path = base_dir / "results" / "all_seed_cv_summary_across_seeds.csv"
+            if cv_path.exists():
+                global_df = pd.read_csv(cv_path)
+                global_mode = "cv_across_seeds"
+        else:
+            ext_path = base_dir / "results" / "all_seed_external_summary.csv"
+            if ext_path.exists():
+                global_df = pd.read_csv(ext_path)
+                global_mode = "external_global"
 
     agg_data = []
     for model in sorted(sub_df["model"].unique()):
         values = sub_df[sub_df["model"] == model]["value"].to_numpy()
         
-        if use_global_std and global_df is not None:
-            if stage == "cv":
-                row = global_df[(global_df["model"] == model) & (global_df["metric"] == metric_name)]
-                if not row.empty:
+        if global_df is not None and global_mode == "external_global":
+            row = global_df[global_df["model"] == model]
+            if not row.empty and f"{metric_name}_mean" in row.columns and f"{metric_name}_std" in row.columns:
+                mean_val = float(row.iloc[0][f"{metric_name}_mean"])
+                error_val = float(row.iloc[0][f"{metric_name}_std"])
+            else:
+                mean_val = float(np.mean(values))
+                error_val = float(np.std(values, ddof=0)) if values.size > 1 else 0.0
+        elif global_df is not None and global_mode == "cv_across_seeds":
+            df2 = global_df.copy()
+            if "metric" in df2.columns:
+                df2["metric"] = df2["metric"].astype(str).str.strip().str.lower()
+                row = df2[(df2["model"] == model) & (df2["metric"] == metric_name)]
+                if not row.empty and "mean" in row.columns and "std" in row.columns:
                     mean_val = float(row.iloc[0]["mean"])
                     error_val = float(row.iloc[0]["std"])
                 else:
                     mean_val = float(np.mean(values))
                     error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
             else:
-                row = global_df[global_df["model"] == model]
-                if not row.empty and f"{metric_name}_mean" in row.columns and f"{metric_name}_std" in row.columns:
-                    mean_val = float(row.iloc[0][f"{metric_name}_mean"])
-                    error_val = float(row.iloc[0][f"{metric_name}_std"])
-                else:
-                    mean_val = float(np.mean(values))
-                    error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+                mean_val = float(np.mean(values))
+                error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
         else:
             mean_val = float(np.mean(values))
             if error_type == "std":
-                error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+                ddof = 1 if stage == "cv" else 0
+                error_val = float(np.std(values, ddof=ddof)) if values.size > 1 else 0.0
             elif error_type == "ci95":
                 error_val = ci95_from_scalars(values.tolist())
             else:
@@ -360,23 +373,39 @@ def plot_back_to_back_bars(
     mcc_stats = []
     models_list = metric_df["model"].unique()
     
-    use_global_std = (error_type == "std")
+    # Prefer explicit summary CSVs when available so numbers match tables exactly.
     global_df = None
-    if use_global_std:
-        global_path = base_dir / "results" / (
-            "all_seed_cv_summary.csv" if stage == "cv" else "all_seed_external_summary.csv"
-        )
-        if global_path.exists():
-            global_df = pd.read_csv(global_path)
+    global_mode = None
+    if error_type == "std":
+        if stage == "cv":
+            cv_path = base_dir / "results" / "all_seed_cv_summary_across_seeds.csv"
+            if cv_path.exists():
+                global_df = pd.read_csv(cv_path)
+                global_mode = "cv_across_seeds"
+        else:
+            ext_path = base_dir / "results" / "all_seed_external_summary.csv"
+            if ext_path.exists():
+                global_df = pd.read_csv(ext_path)
+                global_mode = "external_global"
 
     for model in models_list:
         m_data = metric_df[(metric_df["model"] == model) & (metric_df["metric"] == "mcc")]
         if not m_data.empty:
             values = m_data["value"].to_numpy()
             
-            if use_global_std and global_df is not None:
-                if stage == "cv":
-                    row = global_df[(global_df["model"] == model) & (global_df["metric"] == "mcc")]
+            if global_df is not None and global_mode == "external_global":
+                row = global_df[global_df["model"] == model]
+                if not row.empty and "mcc_mean" in row.columns and "mcc_std" in row.columns:
+                    mean_val = float(row.iloc[0]["mcc_mean"])
+                    error_val = float(row.iloc[0]["mcc_std"])
+                else:
+                    mean_val = float(np.mean(values))
+                    error_val = float(np.std(values, ddof=0)) if values.size > 1 else 0.0
+            elif global_df is not None and global_mode == "cv_across_seeds":
+                df2 = global_df.copy()
+                if "metric" in df2.columns:
+                    df2["metric"] = df2["metric"].astype(str).str.strip().str.lower()
+                    row = df2[(df2["model"] == model) & (df2["metric"] == "mcc")]
                     if not row.empty:
                         mean_val = float(row.iloc[0]["mean"])
                         error_val = float(row.iloc[0]["std"])
@@ -384,17 +413,13 @@ def plot_back_to_back_bars(
                         mean_val = float(np.mean(values))
                         error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
                 else:
-                    row = global_df[global_df["model"] == model]
-                    if not row.empty and "mcc_mean" in row.columns and "mcc_std" in row.columns:
-                        mean_val = float(row.iloc[0]["mcc_mean"])
-                        error_val = float(row.iloc[0]["mcc_std"])
-                    else:
-                        mean_val = float(np.mean(values))
-                        error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+                    mean_val = float(np.mean(values))
+                    error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
             else:
                 mean_val = float(np.mean(values))
                 if error_type == "std":
-                    error_val = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+                    ddof = 1 if stage == "cv" else 0
+                    error_val = float(np.std(values, ddof=ddof)) if values.size > 1 else 0.0
                 elif error_type == "ci95":
                     error_val = ci95_from_scalars(values.tolist())
                 else:
@@ -437,7 +462,7 @@ def plot_back_to_back_bars(
     
     # 将 MCC 数值精准嵌入左侧 Bar 内部
     for i, val in enumerate(mcc_df_plot["mcc_mean"]):
-        ax_left.text(val - 0.02, i, f"{val:.3f}", va='center', ha='left', 
+        ax_left.text(val - 0.02, i, f"{val:.{LEGEND_DECIMALS}f}", va='center', ha='left',
                      fontsize=10, fontweight='bold', color="#111111", zorder=5)
 
     # 5. 绘制右侧：STABILITY RANKING (条形向右延伸)
@@ -455,7 +480,7 @@ def plot_back_to_back_bars(
     
     # 将 Stability 数值嵌入右侧 Bar 内部
     for i, val in enumerate(mcc_df_plot["mcc_error"]):
-        ax_right.text(val - 0.003, i, f"{val:.3f}", va='center', ha='right', 
+        ax_right.text(val - 0.003, i, f"{val:.{LEGEND_DECIMALS}f}", va='center', ha='right',
                      fontsize=10, fontweight='bold', color="#111111", zorder=5)
 
     # 6. 配置核心 Y 轴刻度位置与标签显示
@@ -727,7 +752,7 @@ def plot_model_heatmap(
             rect = Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor='white', linewidth=1.5)
             ax.add_patch(rect)
             
-            ax.text(j, i, f"{val:.3f}", ha="center", va="center", 
+            ax.text(j, i, f"{val:.{LEGEND_DECIMALS}f}", ha="center", va="center",
                     color="#000000", fontsize=11, fontweight="bold")
 
     # 8. [Core modification]: Force a solid black outer border around the outermost edge of the heatmap matrix
