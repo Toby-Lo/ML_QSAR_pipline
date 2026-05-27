@@ -93,9 +93,11 @@ for run in "$RUNS_ROOT"/*; do
   fi
 
   # 06 RoG
-  if should_run "$run" "analysis/RoG_Calpha.dat"; then
+  if should_run "$run" "analysis/RoG_Calpha.dat" "analysis/RoG_Ligand.dat"; then
     cpptraj -i ../../Analysis/06_RoG/RoG.i || true
+    cpptraj -i ../../Analysis/06_RoG/RoG_ligand.i || true
     python3 ../../Analysis/06_RoG/plot_timeseries.py analysis/RoG_Calpha.dat -o analysis/plots/06_RoG_Calpha.svg || true
+    python3 ../../Analysis/06_RoG/plot_timeseries.py analysis/RoG_Ligand.dat -o analysis/plots/06_RoG_Ligand.svg || true
   fi
 
   # 07 SASA (auto mask bootstrap)

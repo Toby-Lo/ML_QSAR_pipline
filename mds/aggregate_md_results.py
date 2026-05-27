@@ -1157,6 +1157,7 @@ def main() -> None:
         "02_Calpha_RMSD": {},
         "03_Ligand_RMSD": {},
         "06_RoG": {},
+        "06_RoG_Ligand": {},
         "07_SASA_protein": {},
         "07_SASA_ligand": {},
         "09_HBond_total": {},
@@ -1190,6 +1191,7 @@ def main() -> None:
             "02_Calpha_RMSD": [analysis_dir / "Calpha_RMSD.dat"],
             "03_Ligand_RMSD": [analysis_dir / "Ligand_RMSD.dat", analysis_dir / "Ligand-RMSD.dat"],
             "06_RoG": [analysis_dir / "RoG_Calpha.dat", analysis_dir / "RoG.dat"],
+            "06_RoG_Ligand": [analysis_dir / "RoG_Ligand.dat"],
             "07_SASA_protein": [analysis_dir / "SASA_protein.dat"],
             "07_SASA_ligand": [analysis_dir / "SASA_ligand.dat"],
         }
@@ -1336,6 +1338,9 @@ def main() -> None:
     plot_multi("06 Radius of Gyration", "RoG (Å)", metrics["06_RoG"], outdir / "06_RoG_multi.svg", args.reference)
     plot_multi_grid("06 Radius of Gyration", "RoG (Å)", metrics["06_RoG"], outdir / "06_RoG_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
+    plot_multi("06 Ligand Radius of Gyration", "Ligand RoG (Å)", metrics["06_RoG_Ligand"], outdir / "06_RoG_Ligand_multi.svg", args.reference)
+    plot_multi_grid("06 Ligand Radius of Gyration", "Ligand RoG (Å)", metrics["06_RoG_Ligand"], outdir / "06_RoG_Ligand_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
+    
     plot_multi("07 Protein SASA", "Protein SASA (Å²)", metrics["07_SASA_protein"], outdir / "07_SASA_protein_multi.svg", args.reference)
     plot_multi_grid("07 Protein SASA", "Protein SASA (Å²)", metrics["07_SASA_protein"], outdir / "07_SASA_protein_grid_3x3.svg", args.reference, grid_legend_no_box=args.grid_legend_no_box)
     
@@ -1363,6 +1368,7 @@ def main() -> None:
         "02_Calpha_RMSD": ("02 Cα RMSD", "Cα RMSD (Å)", "02_Calpha_RMSD.svg"),
         "03_Ligand_RMSD": ("03 Ligand RMSD", "Ligand RMSD (Å)", "03_Ligand_RMSD.svg"),
         "06_RoG": ("06 Radius of Gyration", "RoG (Å)", "06_RoG.svg"),
+        "06_RoG_Ligand": ("06 Ligand Radius of Gyration", "Ligand RoG (Å)", "06_RoG_Ligand.svg"),
         "07_SASA_protein": ("07 Protein SASA", "Protein SASA (Å²)", "07_SASA_protein.svg"),
         "07_SASA_ligand": ("07 Ligand SASA", "Ligand SASA (Å²)", "07_SASA_ligand.svg"),
         "09_HBond_total": ("09 Protein-Ligand H-Bonds", "Number of Hydrogen Bonds", "09_HBond_total.svg"),
@@ -1418,6 +1424,7 @@ def main() -> None:
             analysis_dir / "RMSF.dat",
             analysis_dir / "Ligand_RMSD.dat",
             analysis_dir / "RoG_Calpha.dat",
+            analysis_dir / "RoG_Ligand.dat",
             analysis_dir / "SASA_protein.dat",
             analysis_dir / "SASA_ligand.dat",
             analysis_dir / "HBond_PL_p2l.hbvtime.dat",

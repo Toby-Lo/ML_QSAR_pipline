@@ -1,5 +1,5 @@
 # === Usage (run from a simulation directory) ===
-#    Cα-based RoG!
+#    Protein Cα-based RoG (NOT ligand)!
 #   cd runs/<SYS>
 #   mkdir -p analysis
 #   cpptraj -i  ../../Analysis/06_RoG/RoG.i 
@@ -12,6 +12,9 @@
 # ==============================================
 # Plotting:
 # python3 ../../Analysis/06_RoG/plot_timeseries.py analysis/RoG_Calpha.dat -o analysis/plots/06_RoG_Calpha.svg
+#
+# Ligand RoG:
+# - Use `../../Analysis/06_RoG/RoG_ligand.i` (kept as a separate file to avoid mixing masks/meaning).
 
 
 parm complex.parm7

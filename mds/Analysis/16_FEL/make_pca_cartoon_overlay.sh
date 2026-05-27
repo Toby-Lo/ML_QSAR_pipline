@@ -104,7 +104,7 @@ set shininess, 20
 set cartoon_side_chain_helper, on
 
 ray 2200,1600
-png analysis/plots/16_PCA_Mode_Cartoon_0ns_200ns.png, dpi=300
+png analysis/plots/16_PCA_Mode_Cartoon_0ns_200ns.png, dpi=600
 quit
 PML
 
