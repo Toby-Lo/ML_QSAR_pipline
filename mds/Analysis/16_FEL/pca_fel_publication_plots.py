@@ -39,7 +39,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib.ticker import MaxNLocator
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 R_KCAL = 0.0019872041  # kcal/(mol*K)
@@ -50,11 +50,33 @@ def set_publication_style() -> None:
     rcParams["font.serif"] = ["Cambria", "Times New Roman", "DejaVu Serif"]
     rcParams["mathtext.fontset"] = "stix"
     rcParams["font.size"] = 10.5
+    rcParams["font.weight"] = "bold"
     rcParams["axes.linewidth"] = 1.0
-    rcParams["xtick.direction"] = "in"
-    rcParams["ytick.direction"] = "in"
+    rcParams["axes.labelweight"] = "bold"
+    rcParams["axes.titleweight"] = "bold"
+    rcParams["xtick.direction"] = "out"
+    rcParams["ytick.direction"] = "out"
+    rcParams["xtick.major.width"] = 1.0
+    rcParams["ytick.major.width"] = 1.0
+    rcParams["xtick.major.size"] = 4.0
+    rcParams["ytick.major.size"] = 4.0
     rcParams["xtick.top"] = False
     rcParams["ytick.right"] = False
+
+
+def apply_axis_style(ax, colorbar=None) -> None:
+    ax.tick_params(axis="both", which="major", direction="out", width=1.0, length=4, labelsize=10)
+    ax.tick_params(axis="both", which="minor", direction="out", width=0.8, length=2)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontweight("bold")
+    ax.xaxis.label.set_fontweight("bold")
+    ax.yaxis.label.set_fontweight("bold")
+    ax.title.set_fontweight("bold")
+    if colorbar is not None:
+        colorbar.ax.tick_params(direction="out", width=1.0, length=4)
+        for label in colorbar.ax.get_yticklabels():
+            label.set_fontweight("bold")
+        colorbar.ax.yaxis.label.set_fontweight("bold")
 
 
 def get_morandi_cmap() -> LinearSegmentedColormap:
@@ -114,7 +136,9 @@ def plot_variance(ratio: np.ndarray, out: Path, top_n: int, title: str = "PCA Va
     for x, y in zip(idx, cum):
         ax2.text(x, y + 1.5, f"{y:.1f}%", ha="center", va="bottom", fontsize=8)
 
-    ax1.set_title(title)
+    ax1.set_title(title, fontweight="bold")
+    apply_axis_style(ax1)
+    apply_axis_style(ax2)
     plt.tight_layout()
     plt.savefig(out, dpi=600, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
@@ -130,8 +154,9 @@ def plot_pc12_scatter(pc1: np.ndarray, pc2: np.ndarray, t_ns: np.ndarray, out: P
 
     ax.set_xlabel(f"PC1 ({ratio[0]*100:.1f}%)")
     ax.set_ylabel(f"PC2 ({ratio[1]*100:.1f}%)")
-    ax.set_title(title)
+    ax.set_title(title, fontweight="bold")
     ax.grid(False)
+    apply_axis_style(ax, cbar)
 
     plt.tight_layout()
     plt.savefig(out, dpi=600, bbox_inches="tight", transparent=False, facecolor="white")
@@ -158,7 +183,7 @@ def compute_fel(pc1: np.ndarray, pc2: np.ndarray, temperature: float, bins: int 
     xc = 0.5 * (xedges[:-1] + xedges[1:])
     yc = 0.5 * (yedges[:-1] + yedges[1:])
     X, Y = np.meshgrid(xc, yc)
-    return X, Y, G
+    return X, Y, G, xedges, yedges
 
 
 def gaussian_kernel1d(sigma: float, radius: int) -> np.ndarray:
@@ -174,37 +199,55 @@ def gaussian_smooth2d(arr: np.ndarray, sigma: float = 2.5) -> np.ndarray:
     radius = max(1, int(np.ceil(3.0 * sigma)))
     k = gaussian_kernel1d(sigma, radius)
 
-    # Convolve along x then y (separable Gaussian).
-    tmp = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), axis=1, arr=arr)
+    # Pad with edge values before convolution so histogram borders do not
+    # collapse toward zero and leave artificial empty regions.
+    padded = np.pad(arr, radius, mode="edge")
+    tmp = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), axis=1, arr=padded)
     out = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), axis=0, arr=tmp)
-    return out
+    return out[radius:-radius, radius:-radius]
 
 
 def plot_fel_contour(X: np.ndarray, Y: np.ndarray, G: np.ndarray, out: Path, ratio: np.ndarray, title: str = "Free Energy Landscape (PC1-PC2)") -> None:
     fig, ax = plt.subplots(figsize=(6.5, 5.3), facecolor="white")
     ax.set_facecolor("white")
 
-    vmax = np.nanpercentile(G, 97)
+    finite = G[np.isfinite(G)]
+    if finite.size == 0:
+        raise SystemExit("FEL grid contains no finite values")
+    vmax = np.nanpercentile(finite, 97)
     vmax = vmax if np.isfinite(vmax) and vmax > 0 else 1.0
+    Gplot = np.nan_to_num(G, nan=float(vmax), posinf=float(vmax), neginf=float(vmax))
     levels = np.linspace(0, vmax, 24)
     cmap = get_morandi_cmap()
-    cf = ax.contourf(X, Y, G, levels=levels, cmap=cmap)
-    ax.contour(X, Y, G, levels=levels[::3], colors="white", linewidths=0.35, alpha=0.55)
+    cf = ax.contourf(X, Y, Gplot, levels=levels, cmap=cmap, extend="max")
+
+    # 白色网格线
+    # ax.contour(X, Y, Gplot, levels=levels[::3], colors="white", linewidths=0.35, alpha=0.55)
 
     cbar = fig.colorbar(cf, ax=ax)
     cbar.set_label(r"$\Delta G$ (kcal/mol)")
 
     ax.set_xlabel(f"PC1 ({ratio[0]*100:.1f}%)")
     ax.set_ylabel(f"PC2 ({ratio[1]*100:.1f}%)")
-    ax.set_title(title)
+    ax.set_title(title, fontweight="bold")
     ax.grid(False)
+    apply_axis_style(ax, cbar)
 
     plt.tight_layout()
     plt.savefig(out, dpi=600, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
 
 
-def plot_fel_surface(X: np.ndarray, Y: np.ndarray, G: np.ndarray, out: Path, ratio: np.ndarray, title: str = "Free Energy Landscape (3D Surface)") -> None:
+def plot_fel_surface(
+    X: np.ndarray,
+    Y: np.ndarray,
+    G: np.ndarray,
+    xedges: np.ndarray,
+    yedges: np.ndarray,
+    out: Path,
+    ratio: np.ndarray,
+    title: str = "Free Energy Landscape (3D Surface)",
+) -> None:
     fig = plt.figure(figsize=(7.2, 5.8), facecolor="white")
     ax = fig.add_subplot(111, projection="3d")
 
@@ -221,13 +264,33 @@ def plot_fel_surface(X: np.ndarray, Y: np.ndarray, G: np.ndarray, out: Path, rat
 
     # Clip extreme NaN/inf regions for cleaner surface
     Gp = np.array(G, copy=True)
-    vmax = np.nanpercentile(Gp, 95)
-    Gp = np.where(np.isfinite(Gp), np.minimum(Gp, vmax), np.nan)
+    finite = Gp[np.isfinite(Gp)]
+    if finite.size == 0:
+        raise SystemExit("FEL grid contains no finite values")
+    vmax = np.nanpercentile(finite, 95)
+    Gp = np.where(np.isfinite(Gp), np.minimum(Gp, vmax), float(vmax))
 
     cmap = get_morandi_cmap()
+    norm = Normalize(vmin=float(np.nanmin(Gp)), vmax=float(vmax))
+    xb, yb = np.meshgrid(xedges, yedges)
+
+    base_z = float(np.nanmin(Gp)) - 0.12
+    base_facecolors = cmap(norm(Gp))
+    ax.plot_surface(
+        xb, yb, np.full_like(xb, base_z),
+        facecolors=base_facecolors,
+        rstride=1,
+        cstride=1,
+        shade=False,
+        linewidth=0,
+        antialiased=False,
+        alpha=0.98,
+    )
+
     surf = ax.plot_surface(
         X, Y, Gp,
         cmap=cmap,
+        norm=norm,
         linewidth=0,
         antialiased=True,
         alpha=0.95,
@@ -236,31 +299,38 @@ def plot_fel_surface(X: np.ndarray, Y: np.ndarray, G: np.ndarray, out: Path, rat
         shade=True
     )
 
-    zmin = float(np.nanmin(Gp)) if np.any(np.isfinite(Gp)) else 0.0
+        
+    zmin = base_z
     zmax = float(np.nanmax(Gp)) if np.any(np.isfinite(Gp)) else 1.0
-    # 增加等高线层数（从12层提高到18层），可以让底部的色彩渐变极其细腻顺滑
+    
+    # ==================== 干净底面绘制（去掉所有网格） ====================
     levels = np.linspace(zmin, float(vmax), 18)
-    offset_z = zmin - 0.08  # 稍微往下压一点点，避免与3D曲面的最低能量点重叠粘连
+    offset_z = zmin - 0.03
+    base_filled = np.nan_to_num(Gp, nan=float(vmax))
 
-    # 【核心改进】将底部的线状投影 升级为 文献风的“实体色彩填充面”
-    # 1. 先绘制“实体色彩填充面” (Contourf) —— 这是向文献靠拢的关键！
-    # alpha=0.65 既保证了底部色彩足够饱满斑斓，又不会过于抢戏而遮挡3D坐标网格的透视感
-    ax.contourf(
-        X, Y, Gp,
-        zdir='z',
-        offset=offset_z,
-        cmap=cmap,
-        levels=levels,
-        alpha=0.65
+    # 底面（完全平铺，无任何线条）
+    ax.plot_surface(
+        xb, yb, np.full_like(xb, offset_z),
+        facecolors=cmap(norm(base_filled)),
+        rstride=1,
+        cstride=1,
+        shade=False,
+        linewidth=0,
+        edgecolor="none",      # 关键：彻底关闭边线
+        antialiased=False,
+        alpha=1.0,
     )
 
-    # 2. 再在其上叠加一层“极细的白色或淡色边界线” (Contour)
-    # 这能勾勒出像文献中那样精致、清晰的势阱分界边缘
-    ax.contour(
-        X, Y, Gp, zdir='z', offset=offset_z, colors='white',
-        levels=levels[::2], linewidths=0.5, alpha=0.6
-    )
+    # 【已彻底移除】所有白色等高线和网格
+    # =============================================================
+
     ax.set_zlim(offset_z, zmax)
+
+    # 强制坐标范围让底面铺满
+    x_min, x_max = float(xedges.min()), float(xedges.max())
+    y_min, y_max = float(yedges.min()), float(yedges.max())
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
 
     cbar = fig.colorbar(surf, ax=ax, shrink=0.65, pad=0.02)
     cbar.set_label(r"$\Delta G$ (kcal/mol)")
@@ -274,12 +344,19 @@ def plot_fel_surface(X: np.ndarray, Y: np.ndarray, G: np.ndarray, out: Path, rat
     # 隐藏 3D 坐标系自带的 Z 轴标签，防止随视角乱跑
     ax.set_zlabel("")
     # 使用 2D 绝对坐标强行将 Z 轴标签固定在整个图表的最左侧
-    ax.text2D(-0.09, 0.5, r"$\Delta G$ (kcal/mol)", transform=ax.transAxes, rotation=90, va="center", ha="center")
+    ax.text2D(-0.09, 0.5, r"$\Delta G$ (kcal/mol)", transform=ax.transAxes, rotation=90, va="center", ha="center", fontweight="bold")
     
-    ax.set_title(title)
+    ax.set_title(title, fontweight="bold")
 
     # 调整 3D 视角：elev 是仰角（上下看），azim 是方位角（左右转）
-    ax.view_init(elev=20, azim=-50)
+    ax.view_init(elev=22, azim=-48)
+    ax.tick_params(axis="both", which="major", direction="out", width=1.0, length=4)
+    for label in ax.get_xticklabels() + ax.get_yticklabels() + ax.get_zticklabels():
+        label.set_fontweight("bold")
+    cbar.ax.tick_params(direction="out", width=1.0, length=4)
+    for label in cbar.ax.get_yticklabels():
+        label.set_fontweight("bold")
+    cbar.ax.yaxis.label.set_fontweight("bold")
 
     plt.tight_layout()
     plt.savefig(out, dpi=600, bbox_inches="tight", transparent=False, facecolor="white")
@@ -331,9 +408,9 @@ def main() -> None:
         # Auto bins: enough detail for dense trajectories, but avoid overly sparse maps.
         n = len(pc1)
         bins = int(np.clip(np.sqrt(n) * 1.7, 60, 140))
-    X, Y, G = compute_fel(pc1, pc2, args.temperature, bins)
+    X, Y, G, xedges, yedges = compute_fel(pc1, pc2, args.temperature, bins)
     plot_fel_contour(X, Y, G, args.outdir / "16_FEL_PC1_PC2_contour.svg", ratio, title=f"{prefix}Free Energy Landscape (PC1-PC2)")
-    plot_fel_surface(X, Y, G, args.outdir / "16_FEL_PC1_PC2_surface3D.svg", ratio, title=f"{prefix}Free Energy Landscape (3D Surface)")
+    plot_fel_surface(X, Y, G, xedges, yedges, args.outdir / "16_FEL_PC1_PC2_surface3D.svg", ratio, title=f"{prefix}Free Energy Landscape (3D Surface)")
 
     print("[OK] Figures generated:")
     print(f"  - {(args.outdir / '14_PCA_variance_contribution.svg').resolve()}")
