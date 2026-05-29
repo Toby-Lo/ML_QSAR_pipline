@@ -188,6 +188,48 @@ def compute_fel(pc1: np.ndarray, pc2: np.ndarray, temperature: float, bins: int 
     return X, Y, G, xedges, yedges
 
 
+def save_fel_grid(
+    outdir: Path,
+    X: np.ndarray,
+    Y: np.ndarray,
+    G: np.ndarray,
+    xedges: np.ndarray,
+    yedges: np.ndarray,
+    pc1: np.ndarray,
+    pc2: np.ndarray,
+    temperature: float,
+    bins: int,
+) -> tuple[Path, Path]:
+    outdir.mkdir(parents=True, exist_ok=True)
+    npz_path = outdir / "16_FEL_PC1_PC2_grid.npz"
+    dat_path = outdir / "16_FEL_PC1_PC2_grid.dat"
+
+    np.savez_compressed(
+        npz_path,
+        X=X,
+        Y=Y,
+        G=G,
+        xedges=xedges,
+        yedges=yedges,
+        pc1_min=float(np.min(pc1)),
+        pc1_max=float(np.max(pc1)),
+        pc2_min=float(np.min(pc2)),
+        pc2_max=float(np.max(pc2)),
+        temperature=float(temperature),
+        bins=int(bins),
+    )
+
+    grid = np.column_stack([X.ravel(), Y.ravel(), G.ravel()])
+    np.savetxt(
+        dat_path,
+        grid,
+        fmt="%.8f",
+        header="PC1_center PC2_center DeltaG_kcal_per_mol",
+        comments="# ",
+    )
+    return npz_path, dat_path
+
+
 def gaussian_kernel1d(sigma: float, radius: int) -> np.ndarray:
     x = np.arange(-radius, radius + 1, dtype=float)
     k = np.exp(-(x ** 2) / (2.0 * sigma * sigma))
@@ -411,6 +453,7 @@ def main() -> None:
         n = len(pc1)
         bins = int(np.clip(np.sqrt(n) * 1.7, 60, 140))
     X, Y, G, xedges, yedges = compute_fel(pc1, pc2, args.temperature, bins)
+    npz_path, dat_path = save_fel_grid(args.outdir, X, Y, G, xedges, yedges, pc1, pc2, args.temperature, bins)
     plot_fel_contour(X, Y, G, args.outdir / "16_FEL_PC1_PC2_contour.svg", ratio, title=f"{prefix}Free Energy Landscape (PC1-PC2)")
     plot_fel_surface(X, Y, G, xedges, yedges, args.outdir / "16_FEL_PC1_PC2_surface3D.svg", ratio, title=f"{prefix}Free Energy Landscape (3D Surface)")
 
@@ -419,6 +462,8 @@ def main() -> None:
     print(f"  - {(args.outdir / '14_PCA_PC1_PC2_timecolored.svg').resolve()}")
     print(f"  - {(args.outdir / '16_FEL_PC1_PC2_contour.svg').resolve()}")
     print(f"  - {(args.outdir / '16_FEL_PC1_PC2_surface3D.svg').resolve()}")
+    print(f"  - {npz_path.resolve()}")
+    print(f"  - {dat_path.resolve()}")
 
 
 if __name__ == "__main__":
