@@ -9,6 +9,7 @@ Outputs (SVG):
   - 07_SASA_protein_multi.svg
   - 07_SASA_ligand_multi.svg
   - 09_HBond_total_multi.svg
+  - 16_PCA_3D_FEL_grid_3x3.svg
 
 Outputs (CSV):
   - md_summary_all_systems.csv
@@ -22,6 +23,7 @@ python3 mds/aggregate_md_results.py --reference a1a0m --runs-root mds/runs --out
 from __future__ import annotations
 
 import argparse
+import base64
 import re
 import shutil
 from pathlib import Path
@@ -701,6 +703,72 @@ def plot_pca_cartoon_grid(
     plt.close(fig)
 
 
+def plot_fel_surface_grid(
+    run_dirs: List[Path],
+    out_svg: Path,
+    reference: str,
+    nrows: int = 3,
+    ncols: int = 3,
+) -> None:
+    items: List[Tuple[str, Path]] = []
+    for run_dir in run_dirs:
+        sys_name = run_dir.name
+        img_path = run_dir / "analysis" / "plots" / "16_FEL_PC1_PC2_surface3D.svg"
+        if img_path.exists():
+            items.append((sys_name, img_path))
+    if not items:
+        return
+
+    ordered: List[Tuple[str, Path]] = []
+    ref = [x for x in items if x[0] == reference]
+    others = sorted([x for x in items if x[0] != reference], key=lambda t: t[0])
+    ordered.extend(ref)
+    ordered.extend(others)
+
+    max_panels = nrows * ncols
+    ordered = ordered[:max_panels]
+
+    width_px = 3360
+    height_px = 2940
+    margin_x = 40
+    margin_y = 36
+    gap_x = 28
+    gap_y = 30
+    cell_w = int((width_px - 2 * margin_x - (ncols - 1) * gap_x) / ncols)
+    cell_h = int((height_px - 2 * margin_y - (nrows - 1) * gap_y) / nrows)
+
+    def svg_data_uri(svg_path: Path) -> str:
+        return "data:image/svg+xml;base64," + base64.b64encode(svg_path.read_bytes()).decode("ascii")
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
+        '<svg xmlns="http://www.w3.org/2000/svg" ',
+        '     xmlns:xlink="http://www.w3.org/1999/xlink" ',
+        f'     width="{width_px}" height="{height_px}" viewBox="0 0 {width_px} {height_px}">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="white"/>',
+    ]
+
+    for idx in range(max_panels):
+        row = idx // ncols
+        col = idx % ncols
+        x = margin_x + col * (cell_w + gap_x)
+        y = margin_y + row * (cell_h + gap_y)
+        lines.append(
+            f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" fill="white" stroke="#dddddd" stroke-width="1"/>'
+        )
+        if idx < len(ordered):
+            _, img_path = ordered[idx]
+            href = svg_data_uri(img_path)
+            lines.append(
+                f'<image x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" '
+                f'preserveAspectRatio="xMidYMid meet" href="{href}" xlink:href="{href}"/>'
+            )
+
+    lines.append("</svg>")
+    out_svg.parent.mkdir(parents=True, exist_ok=True)
+    out_svg.write_text("\n".join(lines), encoding="utf-8")
+
+
 def plot_single(
     metric_name: str,
     ylabel: str,
@@ -1062,6 +1130,37 @@ def copy_glob(src_dir: Path, patterns: List[str], dst_dir: Path) -> None:
         for fp in sorted(src_dir.glob(pat)):
             if fp.is_file():
                 shutil.copy2(fp, dst_dir / fp.name)
+
+
+def make_svg_text_bold(svg_path: Path) -> None:
+    if not svg_path.exists() or svg_path.suffix.lower() != ".svg":
+        return
+    try:
+        text = svg_path.read_text(encoding="utf-8")
+    except Exception:
+        return
+    if "font-weight: bold !important" in text:
+        return
+    match = re.search(r"<svg\b[^>]*>", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return
+    style_block = (
+        '<style type="text/css"><![CDATA['
+        'text, tspan, textPath { font-weight: bold !important; }'
+        ']]></style>'
+    )
+    text = text[: match.end()] + style_block + text[match.end():]
+    try:
+        svg_path.write_text(text, encoding="utf-8")
+    except Exception:
+        return
+
+
+def bold_all_svgs(root: Path) -> None:
+    if not root.exists():
+        return
+    for svg_path in root.rglob("*.svg"):
+        make_svg_text_bold(svg_path)
 
 
 def parse_residue_label_map(run_dir: Path) -> Dict[int, str]:
@@ -1459,10 +1558,15 @@ def main() -> None:
             dst_dir=plots_dir,
         )
 
+    bold_all_svgs(outdir)
+    plot_fel_surface_grid(run_dirs, outdir / "16_PCA_3D_FEL_grid_3x3.svg", args.reference)
+    make_svg_text_bold(outdir / "16_PCA_3D_FEL_grid_3x3.svg")
+
     print("[OK] Aggregation complete")
     print(f"  - Output dir: {outdir}")
     print("  - SVG: 02/03/06/07/09 multi-system plots (including RMSF) + grid_3x3 plots + 09_HBond_total_faceted.svg")
     print("  - SVG: 16_PCA_Mode_Cartoon_Transition_grid_3x3.svg")
+    print("  - SVG: 16_PCA_3D_FEL_grid_3x3.svg")
     if args.plot_zn_violin:
         print("  - SVG: 00_Zn_Coordination_Violin.svg (and _horizontal.svg)")
     print("  - CSV: md_summary_all_systems.csv, md_timeseries_long.csv, md_key_results_last50ns.csv")

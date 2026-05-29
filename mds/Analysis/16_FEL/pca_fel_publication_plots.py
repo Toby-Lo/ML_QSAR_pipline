@@ -16,14 +16,16 @@ Example:
     --dt 0.002 --ntwx 5000 --stride 10 --temperature 300
 
 Batch example (run in root path)
-# rm -f mds/runs/*/analysis/plots/16_*
+# rm -f mds/runs/*/analysis/plots/16_FEL*.svg
+cd root/path/
 
 for d in mds/runs/*; do \
   [ -d "$d" ] || continue; \
-  echo "Drawing for $d..."; \
+  echo "=== Drawing for $d ==="; \
   python3 mds/Analysis/16_FEL/pca_fel_publication_plots.py \
     --projection "$d/analysis/PCA_projection.dat" \
-    --outdir "$d/analysis/plots"; \
+    --outdir "$d/analysis/plots" \
+    --dt 0.002 --ntwx 5000 --stride 10 --temperature 300; \
 done
 
 """
