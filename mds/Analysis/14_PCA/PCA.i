@@ -1,7 +1,7 @@
 # === Usage (run from a simulation directory) ===
 #   cd runs/<SYS>
 #   mkdir -p analysis
-#   cpptraj -i ../../Analysis/<STEP>/<FILE>.i
+#   cpptraj -i ../../Analysis/14_PCA/PCA.i
 #
 # === What to edit (common) ===
 # - Topology: `parm complex.parm7` (only change if you renamed it)
@@ -26,16 +26,16 @@ runanalysis diagmatrix COVAR out analysis/PCA_evecs.dat vecs 10 name EVECS
 trajin cMD-Prod.nc 1 last 10
 autoimage
 rms first @CA
-projection PC modes EVECS out analysis/PCA_projection.dat beg 1 end 3 @CA
+projection MYPROJ modes EVECS out analysis/PCA_projection.dat beg 1 end 3 @CA
+run
 
 # 1D histograms of PC1/2/3 projections.
-hist PC:1 bins 100 out analysis/PCA_hist.agr norm name PC1
-hist PC:2 bins 100 out analysis/PCA_hist.agr norm name PC2
-hist PC:3 bins 100 out analysis/PCA_hist.agr norm name PC3
+hist MYPROJ:1 bins 100 out analysis/PCA_hist.agr name PC1
+hist MYPROJ:2 bins 100 out analysis/PCA_hist.agr name PC2
+hist MYPROJ:3 bins 100 out analysis/PCA_hist.agr name PC3
 
 # 2D FEL 
-# hist PC:1 PC:2 bins 100 100 out analysis/FEL_PC1_PC2.gnu free 300 norm
-hist PC:1 PC:2 bins 100 100 out analysis/FEL_PC1_PC2.dat free 300 norm
+hist MYPROJ:1 MYPROJ:2 bins 40 out analysis/FEL_PC1_PC2.gnu free 300 norm
+run
 
-run
-run
+list
