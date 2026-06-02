@@ -1531,6 +1531,9 @@ def main() -> None:
             analysis_dir / "HBond_PL_p2l.avg.dat",
             analysis_dir / "HBond_PL_l2p.avg.dat",
             analysis_dir / "HBond_PL_occupancy_summary.csv",
+            analysis_dir / "PCA_projection.dat",
+            analysis_dir / "plots" / "16_FEL_PC1_PC2_grid.npz",
+            analysis_dir / "plots" / "16_FEL_PC1_PC2_grid.dat",
         ]
         for fp in copy_list:
             safe_copy(fp, data_dir)
@@ -1549,6 +1552,7 @@ def main() -> None:
             patterns=[
                 "14_PCA_variance_contribution.svg",
                 "14_PCA_PC1_PC2_timecolored.svg",
+                "14_PCA_PC1_PC2_morandi_timecolored.svg",
                 "16_FEL_PC1_PC2_contour.svg",
                 "16_FEL_PC1_PC2_surface3D.svg",
                 "16_PCA_Mode_Cartoon_Transition.svg",

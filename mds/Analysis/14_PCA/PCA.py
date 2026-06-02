@@ -1,6 +1,11 @@
+'''
+python3 ../../Analysis/14_PCA/PCA.py --clusters 6 --total-ns 200 -i analysis/PCA_projection.dat -o analysis/plots/14_pca.svg
+'''
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
+import argparse
 from matplotlib import pyplot as plt
 from matplotlib.patches import FancyArrowPatch
 from scipy.stats import gaussian_kde
@@ -9,33 +14,39 @@ from sklearn.cluster import KMeans
 # === Global Font Style ===
 matplotlib.rcParams['font.family'] = 'serif'
 
-# === Input/Output Settings ===
-pca_file = "projection.txt"
-output_fig = "pca.png"
+parser = argparse.ArgumentParser(description="Plot PCA clusters with time labels.")
+parser.add_argument("-i", "--input", default="analysis/PCA_projection.dat", help="Input PCA projection file.")
+parser.add_argument("-o", "--output", default="pca.png", help="Output figure filename.")
+parser.add_argument("--clusters", type=int, required=True, help="Number of KMeans clusters.")
+parser.add_argument("--total-ns", type=float, required=True, help="Total simulation time in nanoseconds.")
+args = parser.parse_args()
 
 # === Load PCA Data ===
-data = np.loadtxt(pca_file)
+input_path = Path(args.input)
+if not input_path.exists():
+    fallback = Path("analysis/PCA_projection.dat")
+    if fallback.exists():
+        input_path = fallback
+    else:
+        raise SystemExit(f"Input PCA projection file not found: {args.input}")
+
+data = np.loadtxt(input_path)
 pc1 = data[:, 1]
 pc2 = data[:, 2]
 pca_coords = np.vstack((pc1, pc2)).T
 total_frames = len(pc1)
 
-# === User Input ===
-try:
-    n_clusters = int(input("Enter number of clusters: "))
-    total_ns = float(input("Enter total simulation time in nanoseconds: "))
-except:
-    print("Invalid input. Exiting.")
-    exit()
+if total_frames < 2:
+    raise SystemExit("Need at least two PCA frames to build a time-colored plot.")
 
-time_per_frame = total_ns / total_frames
+time_per_frame = args.total_ns / (total_frames - 1)
 
 # === Density Estimation ===
 xy = np.vstack([pc1, pc2])
 z = gaussian_kde(xy)(xy)
 
 # === KMeans Clustering ===
-kmeans = KMeans(n_clusters=n_clusters, random_state=42).fit(pca_coords)
+kmeans = KMeans(n_clusters=args.clusters, random_state=42).fit(pca_coords)
 labels = kmeans.labels_
 
 # === Setup ===
@@ -44,7 +55,7 @@ label_names_all = [chr(i) for i in range(65, 91)]  # A–Z
 
 # === Find Min-Energy Frames per Cluster ===
 cluster_min_frames = []
-for cluster_id in range(n_clusters):
+for cluster_id in range(args.clusters):
     indices = np.where(labels == cluster_id)[0]
     cluster_z = z[indices]
     min_frame = indices[np.argmax(cluster_z)]
@@ -98,5 +109,5 @@ ax.set_xlabel('PC1', fontsize=14, fontweight='bold')
 ax.set_ylabel('PC2', fontsize=14, fontweight='bold')
 ax.tick_params(labelsize=12)
 plt.tight_layout()
-plt.savefig(output_fig, dpi=600)
-print(f"\nPCA plot saved as '{output_fig}' with elegant gray arrows and Times New Roman font.")
+plt.savefig(args.output, dpi=600)
+print(f"\nPCA plot saved as '{args.output}' with elegant gray arrows and Times New Roman font.")
