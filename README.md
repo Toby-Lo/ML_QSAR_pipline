@@ -11,6 +11,32 @@ This repository contains an end-to-end QSAR and virtual screening workflow for b
 - ADMET scoring and weight-sensitivity analysis
 - Performance and screening-funnel visualization
 
+## Repository Structure
+
+- `config/` - YAML configuration files for model training and screening
+- `data/` - Input datasets and processed molecular feature tables
+- `env/` - Conda environment files
+- `scripts/` - Step-wise QSAR, calibration, AD, interpretation, and screening scripts
+- `models_out/` - Model artifacts, split-specific results, calibration files, AD outputs, and screening results
+- `figures/` - Generated figures and summary plots
+
+## Input Data Requirements
+
+The training dataset should contain standardized molecular structures and binary activity labels. At minimum, the QSAR workflow expects compound identifiers, canonical SMILES, activity labels, and the molecular features generated from the preprocessing scripts. Virtual-screening input files should contain SMILES strings and compound identifiers, such as ZINC IDs, when available.
+
+Typical columns include:
+
+- `compound_id`
+- `smiles` or `canonical_smiles`
+- `pIC50`
+- `label`
+
+Screening files are usually stored as Parquet tables for efficient batch inference.
+
+## Reproducibility
+
+The workflow uses scaffold-aware data partitioning and fixed random seeds to improve reproducibility. In the manuscript-associated NSD2 analysis, repeated scaffold partitions were generated across multiple split seeds, and the final representative SVC realization was based on split seed `12345`. Downstream calibration, applicability-domain analysis, Y-scrambling, SHAP interpretation, and virtual screening should be performed using the same trained model artifacts and feature schema.
+
 ## Environment
 
 Create the conda environment with:
@@ -63,7 +89,7 @@ Run AD analysis:
 ```bash
 python scripts/step22_applicability_domain.py \
   --run-dir models_out/qsar_ml_YYYYMMDD_HHMMSS \
-  --split-seed 42 \
+  --split-seed 12345 \
   --model SVC
 ```
 
@@ -73,7 +99,7 @@ Run virtual screening inference:
 python scripts/step33_vs_inference.py \
   --model_dir models_out/qsar_ml_YYYYMMDD_HHMMSS \
   --model_name SVC \
-  --seed 42 \
+  --seed 12345 \
   --input data/database/zinc_features.parquet \
   --ad_integration
 ```
@@ -144,9 +170,35 @@ python scripts/step36_weight_sensitivity_test.py \
 - `scripts/step41_threshold_analysis.py`: analyze threshold-dependent metrics.
 - `scripts/step42_vs_visualization.py`: create screening funnel figures and summary tables.
 
+## Main Outputs
+
+The pipeline writes model and screening outputs under:
+
+`models_out/qsar_ml_YYYYMMDD_HHMMSS/`
+
+Important outputs include:
+
+- trained model artifacts
+- split-specific performance summaries
+- calibration outputs
+- Y-scrambling results
+- applicability-domain metrics
+- SHAP interpretation files
+- virtual-screening prediction files
+- AD-aware and ADMET-aware ranked hit tables
+- screening funnel visualizations
+
 ## Notes
 
 - Training and screening data are typically stored as CSV or Parquet tables.
 - Screening input should include `smiles` and compound identifiers such as `zinc_id` when available.
 - Most downstream scripts read from `models_out/qsar_ml_YYYYMMDD_HHMMSS/` and reuse artifacts from step10.
 
+
+## Citation
+
+- If you use this workflow, please cite the associated manuscript:
+
+- Reliability-Aware and Interpretable Virtual Screening under Scaffold-Shift Conditions Prioritizes Candidate NSD2 Inhibitors.
+
+- The full citation will be updated after publication.
