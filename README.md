@@ -1,6 +1,6 @@
 # Robust QSAR via Nested Scaffold-Grouped Cross-Validation
 
-This repository contains an end-to-end QSAR and virtual screening workflow for binary activity prediction. The pipeline focuses on scaffold-aware training, post-hoc calibration, applicability-domain-aware ranking, and optional ADMET-based prioritization.
+This repository contains an end-to-end QSAR and virtual screening workflow for binary activity prediction. The pipeline focuses on scaffold-aware training, post-hoc calibration, applicability-domain-aware ranking, and ADMET-based prioritization.
 
 ## What It Covers
 
